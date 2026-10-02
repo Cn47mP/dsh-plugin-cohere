@@ -1,0 +1,13 @@
+node_modules/
+lib/
+*.tsbuildinfo
+*.tgz
+
+# Local build/runtime scratch space (never part of the plugin).
+.tools/
+
+# Excluded internal docs and test suites
+DESIGN.md
+WORKLOG.md
+CHANGELOG.md
+test/

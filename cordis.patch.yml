@@ -1,0 +1,21 @@
+# dsh-plugin-cohere bundle patch.
+#
+# Mounts one model-provider row into the DSH profile roster. The row id doubles
+# as the settings namespace (`ctx.fiber.entry.options.id`), so keep it stable:
+# the web "Models" page stores the Cohere credential under this id.
+#
+# Install into a profile with:
+#
+#   dsh plugin --profile desktop add link:<path-to-this-repo>
+#   # then add the insert row below to the profile's own cordis.patch.yml
+#
+# The plugin declares `inject: ['llm']`, so this row can only mount in a profile
+# whose roster already provides the first-party `llm` service.
+- insert:
+    - id: llm-cohere
+      name: 'dsh-plugin-cohere'
+      config:
+        # Credential reference, not the secret itself: the key is stored through
+        # the credentials service (web Models page) or exported under this name
+        # in the environment that launched DSH.
+        apiKeyEnv: COHERE_API_KEY
