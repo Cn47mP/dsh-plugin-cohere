@@ -1,0 +1,33 @@
+name: CI
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  verify:
+    runs-on: ubuntu-latest
+    strategy:
+      fail-fast: false
+      matrix:
+        # `engines.node` is >=22; 24 is covered so a future floor bump is not silent.
+        node: ['22', '24']
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: ${{ matrix.node }}
+          cache: npm
+      - name: Install
+        run: npm ci --no-audit --no-fund
+      - name: Build
+        run: npm run build
+      - name: Typecheck
+        run: npm run typecheck
+      - name: Test
+        run: npm test

@@ -19,19 +19,45 @@
 
 ## 安装到 DSH
 
-1. 在目标 profile 目录中安装依赖（以 `~/.dsh/profiles/desktop` 为例）：
+`dsh plugin` 只是把参数转发给 profile 目录里的 pnpm，所以下面两种写法等价（以 `~/.dsh/profiles/<name>` 为例）：
 
-   ```bash
-   cd ~/.dsh/profiles/desktop
-   # 通过 GitHub 安装
-   pnpm add github:cn47mp/dsh-plugin-cohere
-   # 或通过本地克隆路径安装
-   pnpm add <path-to-dsh-plugin-cohere>
-   ```
+```bash
+dsh plugin --profile <name> add dsh-plugin-cohere    # 推荐
+```
 
-2. 在 profile 的 `package.json` 中，向 `dsh.profile.bundles` 数组**追加** `"dsh-plugin-cohere"`。
+```bash
+cd ~/.dsh/profiles/<name>
+pnpm add dsh-plugin-cohere
+```
 
-3. 重启 DSH，在 **Models** 设置页 Cohere 行的卡片中**填入 API Key**（存入凭据服务，不落盘明文），点击 **从端点刷新模型** 即可使用。
+也可以直接在 Web 侧边栏的**插件**页安装。注意 `desktop` profile 由 Electron 持有，npm CLI 会拒绝针对它的插件请求，请在 Desktop 的插件页或内置命令里操作。
+
+包本身已带编译产物（`lib/`），安装即完成，**无需任何构建脚本批准**。
+
+安装后还要做两件事：
+
+1. 在 profile 的 `package.json` 中，向 `dsh.profile.bundles` 数组**追加** `"dsh-plugin-cohere"`（Web 插件页安装会自动选入组合包，命令行安装需手动补）。
+2. 重启 DSH，在 **Models** 设置页 Cohere 行的卡片中**填入 API Key**（存入凭据服务，不落盘明文），点击 **从端点刷新模型** 即可使用。
+
+### 其他安装方式
+
+| 方式 | spec | 说明 |
+| :--- | :--- | :--- |
+| npm 注册表 | `dsh-plugin-cohere` | 推荐；`prepack` 已把 `lib/` 打进 tarball |
+| tarball | `pnpm add /abs/path/dsh-plugin-cohere-<ver>.tgz` | 离线分发；同样自带 `lib/` |
+| 本地目录 | `pnpm add /abs/path/to/dsh-plugin-cohere` | 直接指向 clone 的仓库，开发用；请**先用绝对路径**，相对路径会被拒绝 |
+| git | `pnpm add github:cn47mp/dsh-plugin-cohere` | **需先自行构建**：pnpm 11 默认拦下依赖的构建脚本（`allowBuilds` 未列出的包按未审查处理，`strictDepBuilds` 默认 `true`），而 `prepare` 在全新 clone 中依赖尚未安装、`tsc` 不存在。保持 `lib/` 不入库时，这条路必须先手动 `npm install && npm run build` |
+
+## 开发
+
+```bash
+git clone https://github.com/cn47mp/dsh-plugin-cohere.git
+cd dsh-plugin-cohere
+npm install       # 安装依赖并构建（prepare 钩子会跑 build）
+npm run build     # 编译 TypeScript 到 lib/，并把 Web 端客户端代码复制为 lib/client.js
+npm run typecheck # 仅执行 TypeScript 类型检查
+npm test          # node --test
+```
 
 ## 配置项
 
@@ -50,10 +76,6 @@
 | `requestImagePixelBudget`| `4194304` (2048²) | 单图像素缩放预算 |
 | `requestImageMaxBytes` | `1048576` (1MB) | 单图编码字节上限 |
 
-## 开发构建
+## 许可
 
-```bash
-pnpm install
-npm run build     # 编译 TypeScript 并复制 Web 客户端代码到 lib/
-npm run typecheck # 仅执行 TypeScript 类型检查
-```
+[MIT](./LICENSE)
