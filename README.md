@@ -59,28 +59,6 @@ npm run typecheck # 仅执行 TypeScript 类型检查
 npm test          # node --test
 ```
 
-## 发布
-
-发布走 [`Release`](.github/workflows/release.yml) 工作流，推 `v*` 标签即触发。工作流会先跑 typecheck 与测试，再校验标签版本与 `package.json` 的 `version` 一致，并确认 `lib/index.js`、`lib/client.js`、`cordis.patch.yml` 都在包内，才允许发布：
-
-```bash
-# 改 package.json 的 version（或 npm version patch --no-git-tag-version）
-git commit -am "chore: release v0.1.11"
-git tag v0.1.11
-git push origin v0.1.11
-```
-
-**首次发布必须提供一个 npm token**：npm 的 trusted publishing（OIDC）只能配置在**已存在**的包上，而发布新包本身就要凭据，所以第一个版本只能用 token 引导。在仓库 `Settings → Secrets and variables → Actions` 添加 `NPM_TOKEN`（npm 的 Automation token，或对该包有读写权限的 granular token），然后重跑工作流。
-
-包建立后建议**改用 OIDC**：在 npmjs.com 该包的 Settings 里把 trusted publisher 指向本仓库的 `release.yml`，此后不再需要 `NPM_TOKEN`，provenance 也由 npm 签名。
-
-不想走 CI 也可以本机发布（注意必须显式指定官方源，镜像只读）：
-
-```bash
-npm login --registry=https://registry.npmjs.org/
-npm publish --registry=https://registry.npmjs.org/
-```
-
 ## 配置项
 
 | 字段 | 默认值 | 说明 |
