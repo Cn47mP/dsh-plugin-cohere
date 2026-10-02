@@ -1,0 +1,9 @@
+# Normalize everything to LF in the repository and in the working tree, so a
+# Windows checkout cannot turn a one-line edit into a whole-file CRLF diff.
+* text=auto eol=lf
+
+*.png binary
+*.jpg binary
+*.jpeg binary
+*.tgz binary
+*.ico binary
