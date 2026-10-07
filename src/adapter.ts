@@ -19,9 +19,17 @@ import type {
   StreamChunk,
 } from '@deepseek-ai/dsh-llm';
 import type { CohereModelConfig, CohereOptions } from './config.js';
-import { CohereFailure, failureFromProtocol, failureFromResponse, failureFromTransport } from './failure.js';
+import {
+  CohereFailure,
+  failureFromProtocol,
+  failureFromResponse,
+  failureFromTransport,
+  readErrorDetail,
+  unsupportedFeature,
+  type UnsupportedFeature,
+} from './failure.js';
 import { findCatalogEntry } from './models.js';
-import { buildChatRequest } from './wire/request.js';
+import { buildChatRequest, type CohereChatRequest } from './wire/request.js';
 import { translateChatStream, type CohereStreamNotice } from './wire/event-stream.js';
 import {
   messagesHaveImage,
@@ -63,8 +71,51 @@ const UNLISTED_MODEL: CohereModelConfig = {
   maxTokens: 8_192,
   inputModalities: ['text'],
   reasoning: false,
+  tools: true,
+  citations: true,
+  strictTools: true,
   deprecated: false,
 };
+
+/** Whether one request still carries a field the provider may reject. */
+function requestCarries(request: CohereChatRequest, feature: UnsupportedFeature): boolean {
+  switch (feature) {
+    case 'tools':
+      return request.tools !== undefined;
+    case 'citations':
+      return request.citation_options !== undefined;
+    case 'strict_tools':
+      return request.strict_tools === true;
+    case 'response_format':
+      return request.response_format !== undefined;
+  }
+}
+
+/** Rebuild one request without the named field (and what depends on it). */
+function withoutFeature(
+  request: CohereChatRequest,
+  feature: UnsupportedFeature,
+): CohereChatRequest {
+  switch (feature) {
+    case 'tools': {
+      // strict_tools only constrains tool calls, so it leaves with the tools.
+      const { tools: _tools, strict_tools: _strict, ...rest } = request;
+      return rest;
+    }
+    case 'citations': {
+      const { citation_options: _citations, ...rest } = request;
+      return rest;
+    }
+    case 'strict_tools': {
+      const { strict_tools: _strict, ...rest } = request;
+      return rest;
+    }
+    case 'response_format': {
+      const { response_format: _format, ...rest } = request;
+      return rest;
+    }
+  }
+}
 
 /** Everything the adapter needs from the plugin instance. */
 export interface CohereAdapterDeps {
@@ -127,11 +178,98 @@ export class CohereAdapter extends LlmAdapter {
   readonly #deps: CohereAdapterDeps;
 
   /**
+   * Request fields the provider refused for a model, remembered for the
+   * process lifetime.
+   *
+   * The catalog declares each route's live Cohere `features`, but a
+   * hand-added row or an endpoint change can over-declare one. Remembering the
+   * refusal turns that into a single failed request instead of every call on
+   * that route failing with the same 400.
+   */
+  readonly #degraded = new Map<string, Set<UnsupportedFeature>>();
+
+  /**
    * @param deps - live configuration access, credential resolution, diagnostics.
    */
   constructor(deps: CohereAdapterDeps) {
     super();
     this.#deps = deps;
+  }
+
+  /** Drop every field the provider has refused for this model. */
+  #applyDegraded(modelId: string, request: CohereChatRequest): CohereChatRequest {
+    const features = this.#degraded.get(modelId);
+    if (features === undefined || features.size === 0) return request;
+    let current = request;
+    for (const feature of features) {
+      if (requestCarries(current, feature)) current = withoutFeature(current, feature);
+    }
+    return current;
+  }
+
+  /**
+   * POST one chat request, retrying at most once without a field the provider
+   * rejects for this model.
+   *
+   * A route that lacks a live Cohere feature (`tools`, `citations`,
+   * `strict_tools`, `response_format`) answers 400 naming the field. The
+   * catalog already gates the shipped routes, so this only fires for rows the
+   * catalog got wrong; the refusal is remembered so the next call on the route
+   * goes out correct the first time.
+   * @param request - the request body to send.
+   * @param send - everything else the send needs: route, endpoint, key,
+   *   the composed abort signal for `fetch`, and the caller's own signal for
+   *   abort classification (a watchdog abort must stay a `TIMEOUT`).
+   * @returns the first successful (2xx) response.
+   * @throws CohereFailure for transport errors and non-retryable rejections.
+   */
+  async #sendChat(
+    request: CohereChatRequest,
+    send: {
+      readonly model: CohereModelConfig;
+      readonly baseURL: string;
+      readonly apiKey: string;
+      readonly signal: AbortSignal;
+      readonly callerSignal?: AbortSignal;
+    },
+  ): Promise<Response> {
+    let current = this.#applyDegraded(send.model.id, request);
+    for (let attempt = 0; ; attempt += 1) {
+      let response: Response;
+      try {
+        response = await fetch(`${send.baseURL}/chat`, {
+          method: 'POST',
+          headers: {
+            authorization: `Bearer ${send.apiKey}`,
+            'content-type': 'application/json',
+            accept: 'text/event-stream',
+            'x-client-name': 'dsh-plugin-cohere',
+            ...attributionHeaders(),
+          },
+          body: JSON.stringify(current),
+          signal: send.signal,
+        });
+      } catch (error) {
+        throw failureFromTransport(error, send.callerSignal);
+      }
+      if (response.ok) return response;
+
+      // The failure path consumes the body for its message, so the detail is
+      // read from a clone and the original stays intact for the failure.
+      const detail = await readErrorDetail(response.clone());
+      const feature = attempt === 0 ? unsupportedFeature(detail) : undefined;
+      if (feature === undefined || !requestCarries(current, feature)) {
+        throw await failureFromResponse(response);
+      }
+      const degraded = this.#degraded.get(send.model.id) ?? new Set<UnsupportedFeature>();
+      degraded.add(feature);
+      this.#degraded.set(send.model.id, degraded);
+      current = withoutFeature(current, feature);
+      this.#deps.onNotice?.({
+        kind: 'unsupported-feature',
+        detail: { model: send.model.id, feature, message: detail },
+      });
+    }
   }
 
   /** @inheritdoc */
@@ -247,17 +385,12 @@ export class CohereAdapter extends LlmAdapter {
 
     let response: Response;
     try {
-      response = await fetch(`${config.baseURL}/chat`, {
-        method: 'POST',
-        headers: {
-          authorization: `Bearer ${apiKey}`,
-          'content-type': 'application/json',
-          accept: 'text/event-stream',
-          'x-client-name': 'dsh-plugin-cohere',
-          ...attributionHeaders(),
-        },
-        body: JSON.stringify(request),
+      response = await this.#sendChat(request, {
+        model,
+        baseURL: config.baseURL,
+        apiKey,
         signal,
+        callerSignal: caller,
       });
     } catch (error) {
       throw failureFromTransport(error, caller);

@@ -92,6 +92,12 @@ window.__ModuleLoader__.load({
       maxTokens: asNumber(row.maxTokens, 8192),
       inputModalities: row.image === true ? ['text', 'image'] : ['text'],
       reasoning: row.reasoning === true,
+      // Per-route request features from the live Cohere `features` list; the
+      // host defaults every absent flag to `true`, so an unknown source keeps
+      // the modern behaviour and the adapter's retry net covers a wrong guess.
+      tools: row.tools !== false,
+      citations: row.citations !== false,
+      strictTools: row.strictTools !== false,
       deprecated: false,
     });
 
@@ -103,6 +109,11 @@ window.__ModuleLoader__.load({
       maxTokens: 8192,
       image: Array.isArray(model.inputModalities) && model.inputModalities.includes('image'),
       reasoning: false,
+      // The discovery response carries no `features`, so these stay undefined
+      // and `toRow` writes the capable defaults.
+      tools: undefined,
+      citations: undefined,
+      strictTools: undefined,
     });
 
     /** Map one effective catalog entry onto the editable row shape. */
@@ -132,6 +143,9 @@ window.__ModuleLoader__.load({
         image: modalities.includes('image'),
         reasoning:
           model.reasoning !== undefined && model.reasoning !== false && model.reasoning !== null,
+        tools: model.tools,
+        citations: model.citations,
+        strictTools: model.strictTools,
       };
     };
 
@@ -143,6 +157,9 @@ window.__ModuleLoader__.load({
       maxTokens: typeof model.maxTokens === 'number' ? model.maxTokens : undefined,
       image: Array.isArray(model.inputModalities) && model.inputModalities.includes('image'),
       reasoning: model.reasoning === true,
+      tools: model.tools,
+      citations: model.citations,
+      strictTools: model.strictTools,
     });
 
     const labelStyle = { fontSize: '12px', lineHeight: '1.5' };

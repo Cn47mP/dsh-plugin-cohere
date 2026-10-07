@@ -276,7 +276,11 @@ export async function* translateChatStream(
             type: 'tool-call',
             id: open.id as ToolCallId,
             name: open.name,
-            arguments: open.arguments,
+            // Cohere sends `"arguments": ""` and no deltas for a tool that takes
+            // no parameters (verified live). An empty string is not a JSON
+            // document, so it would break the tool executor here and be rejected
+            // on replay ("tool arguments must be a stringified JSON object").
+            arguments: open.arguments.length === 0 ? '{}' : open.arguments,
           } satisfies ToolCallBlock)
         : { type: open.kind, text: open.text };
     if (meaningful) producedContent += 1;

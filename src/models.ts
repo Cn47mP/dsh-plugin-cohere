@@ -6,6 +6,15 @@
  * picker, so the shipped catalog is the primary source and endpoint discovery is
  * an optional enrichment.
  *
+ * The `tools` / `citations` / `strictTools` flags are the live per-model
+ * `features` of `GET /v2/models?endpoint=chat` (read on 2026-10-02): a route
+ * that lacks a feature rejects the corresponding request field with a 400
+ * ("tool use is not supported by the provided model", "citations are not
+ * supported for this model", …), and a request the provider refuses is worse
+ * than a slightly reduced one — so the flags are per-route, not per-family.
+ * The adapter additionally degrades at runtime when a route rejects a field
+ * the catalog got wrong (see `adapter.ts`).
+ *
  * Verified against the live `GET /v1/models?endpoint=chat` on 2026-10-02:
  * the context windows below are the API's `context_length` values, which differ
  * from the older documentation figures for several routes.
@@ -29,6 +38,12 @@ export interface CohereCatalogEntry {
   readonly inputModalities: readonly ('text' | 'image')[];
   /** Whether the route accepts `thinking` and emits thinking content. */
   readonly reasoning: boolean;
+  /** Whether the route accepts the `tools` parameter at all. */
+  readonly tools: boolean;
+  /** Whether the route accepts `citation_options`. */
+  readonly citations: boolean;
+  /** Whether the route accepts `strict_tools` (and `tool_choice`). */
+  readonly strictTools: boolean;
   /** Whether Cohere marks the model deprecated. */
   readonly deprecated: boolean;
 }
@@ -46,6 +61,9 @@ export const COHERE_MODELS: readonly CohereCatalogEntry[] = [
     maxTokens: 64_000,
     inputModalities: ['text', 'image'],
     reasoning: true,
+    tools: true,
+    citations: true,
+    strictTools: true,
     deprecated: false,
   },
   {
@@ -56,6 +74,9 @@ export const COHERE_MODELS: readonly CohereCatalogEntry[] = [
     maxTokens: 32_000,
     inputModalities: ['text'],
     reasoning: true,
+    tools: true,
+    citations: true,
+    strictTools: true,
     deprecated: false,
   },
   {
@@ -66,9 +87,13 @@ export const COHERE_MODELS: readonly CohereCatalogEntry[] = [
     maxTokens: 8_000,
     inputModalities: ['text'],
     reasoning: false,
+    tools: true,
+    citations: true,
+    strictTools: true,
     deprecated: false,
   },
   {
+    // No `tools` feature live: sending `tools` to this route is a 400.
     id: 'command-a-vision-07-2025',
     name: 'Command A Vision (07-2025)',
     description: 'Vision-capable Command A.',
@@ -76,6 +101,9 @@ export const COHERE_MODELS: readonly CohereCatalogEntry[] = [
     maxTokens: 8_000,
     inputModalities: ['text', 'image'],
     reasoning: false,
+    tools: false,
+    citations: true,
+    strictTools: false,
     deprecated: false,
   },
   {
@@ -86,6 +114,9 @@ export const COHERE_MODELS: readonly CohereCatalogEntry[] = [
     maxTokens: 8_000,
     inputModalities: ['text'],
     reasoning: false,
+    tools: true,
+    citations: true,
+    strictTools: false,
     deprecated: false,
   },
   {
@@ -96,6 +127,9 @@ export const COHERE_MODELS: readonly CohereCatalogEntry[] = [
     maxTokens: 4_000,
     inputModalities: ['text'],
     reasoning: false,
+    tools: true,
+    citations: true,
+    strictTools: true,
     deprecated: false,
   },
   {
@@ -106,6 +140,9 @@ export const COHERE_MODELS: readonly CohereCatalogEntry[] = [
     maxTokens: 4_000,
     inputModalities: ['text'],
     reasoning: false,
+    tools: true,
+    citations: true,
+    strictTools: true,
     deprecated: false,
   },
   {
@@ -116,6 +153,9 @@ export const COHERE_MODELS: readonly CohereCatalogEntry[] = [
     maxTokens: 4_000,
     inputModalities: ['text'],
     reasoning: false,
+    tools: true,
+    citations: true,
+    strictTools: true,
     deprecated: false,
   },
   {
@@ -126,16 +166,24 @@ export const COHERE_MODELS: readonly CohereCatalogEntry[] = [
     maxTokens: 4_000,
     inputModalities: ['text'],
     reasoning: false,
+    tools: true,
+    citations: true,
+    strictTools: true,
     deprecated: false,
   },
   {
+    // The live `features` include `reasoning`; tool use is fully supported but
+    // citations are not — requesting them 400s the whole call.
     id: 'north-mini-code-1-0',
     name: 'North Mini Code 1.0',
-    description: 'Code-specialized North model.',
+    description: 'Code-specialized North model with reasoning and tool use.',
     contextWindow: 436_000,
     maxTokens: 64_000,
     inputModalities: ['text'],
-    reasoning: false,
+    reasoning: true,
+    tools: true,
+    citations: false,
+    strictTools: true,
     deprecated: false,
   },
   {
@@ -146,6 +194,9 @@ export const COHERE_MODELS: readonly CohereCatalogEntry[] = [
     maxTokens: 16_000,
     inputModalities: ['text'],
     reasoning: false,
+    tools: false,
+    citations: false,
+    strictTools: false,
     deprecated: false,
   },
   {
@@ -156,6 +207,9 @@ export const COHERE_MODELS: readonly CohereCatalogEntry[] = [
     maxTokens: 4_000,
     inputModalities: ['text'],
     reasoning: false,
+    tools: false,
+    citations: false,
+    strictTools: false,
     deprecated: false,
   },
   {
@@ -166,6 +220,9 @@ export const COHERE_MODELS: readonly CohereCatalogEntry[] = [
     maxTokens: 4_000,
     inputModalities: ['text', 'image'],
     reasoning: false,
+    tools: false,
+    citations: true,
+    strictTools: false,
     deprecated: false,
   },
   {
@@ -176,6 +233,9 @@ export const COHERE_MODELS: readonly CohereCatalogEntry[] = [
     maxTokens: 2_000,
     inputModalities: ['text'],
     reasoning: false,
+    tools: true,
+    citations: true,
+    strictTools: false,
     deprecated: false,
   },
   {
@@ -186,6 +246,9 @@ export const COHERE_MODELS: readonly CohereCatalogEntry[] = [
     maxTokens: 2_000,
     inputModalities: ['text'],
     reasoning: false,
+    tools: true,
+    citations: true,
+    strictTools: false,
     deprecated: false,
   },
   {
@@ -196,6 +259,9 @@ export const COHERE_MODELS: readonly CohereCatalogEntry[] = [
     maxTokens: 2_000,
     inputModalities: ['text'],
     reasoning: false,
+    tools: true,
+    citations: true,
+    strictTools: false,
     deprecated: false,
   },
   {
@@ -206,27 +272,12 @@ export const COHERE_MODELS: readonly CohereCatalogEntry[] = [
     maxTokens: 2_000,
     inputModalities: ['text'],
     reasoning: false,
+    tools: true,
+    citations: true,
+    strictTools: false,
     deprecated: false,
   },
 ];
-
-/**
- * Whether one route accepts the `strict_tools` request field.
- *
- * Cohere documents `strict_tools` (and `tool_choice`) for `command-r7b-12-2024`
- * and newer models only, so older Command R routes must not receive it.
- * Verified live on `command-a-03-2025` (200 with `strict_tools: true`).
- * Source: https://docs.cohere.com/reference/chat
- * @param modelId - exact model id.
- * @returns true when the route may receive `strict_tools`.
- */
-export function supportsStrictTools(modelId: string): boolean {
-  return (
-    modelId.startsWith('command-a-') ||
-    modelId.startsWith('north-') ||
-    modelId === 'command-r7b-12-2024'
-  );
-}
 
 /**
  * Find one catalog entry by exact model id.

@@ -44,6 +44,13 @@ const ModelConfig = z.object({
     .array(z.union([z.const('text'), z.const('image')]))
     .default(['text']),
   reasoning: z.boolean().default(false),
+  // Per-route request features, mirroring Cohere's live `features` list. A row
+  // the operator adds by hand defaults to "capable"; the adapter retries
+  // without a rejected field at runtime, so a wrong guess self-heals with one
+  // extra request instead of failing every call.
+  tools: z.boolean().default(true),
+  citations: z.boolean().default(true),
+  strictTools: z.boolean().default(true),
   deprecated: z.boolean().default(false),
 });
 
@@ -184,6 +191,9 @@ function normalizeModel(raw: unknown): CohereModelConfig | undefined {
     maxTokens: positiveInt(row.maxTokens, 8_192),
     inputModalities: modalities.length > 0 ? modalities : ['text'],
     reasoning: row.reasoning === true,
+    tools: row.tools !== false,
+    citations: row.citations !== false,
+    strictTools: row.strictTools !== false,
     deprecated: row.deprecated === true,
   };
 }

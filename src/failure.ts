@@ -86,7 +86,7 @@ interface CohereErrorBody {
 }
 
 /** Extract the human-readable provider detail from an error response body. */
-async function readErrorDetail(response: Response): Promise<string> {
+export async function readErrorDetail(response: Response): Promise<string> {
   try {
     const text = await response.text();
     if (text.length === 0) return '';
@@ -217,4 +217,35 @@ export function failureFromTransport(error: unknown, signal?: AbortSignal): Cohe
  */
 export function failureFromProtocol(detail: string): CohereFailure {
   return new CohereFailure(`cohere: ${detail}`, 'SERVER');
+}
+
+/**
+ * One request field a Cohere route can reject for lacking the feature.
+ *
+ * Cohere answers a field the model does not support with a plain 400 naming
+ * the field ("tool use is not supported by the provided model: …",
+ * "citations are not supported for this model.", …). The adapter matches the
+ * detail against these patterns to drop exactly that field and retry once.
+ */
+export type UnsupportedFeature = 'tools' | 'citations' | 'strict_tools' | 'response_format';
+
+/** Detail-text patterns for each rejectable request field, in match order. */
+const UNSUPPORTED_PATTERNS: readonly (readonly [UnsupportedFeature, RegExp])[] = [
+  ['tools', /tool use is not supported/i],
+  ['citations', /citations are not supported/i],
+  ['strict_tools', /strict_tools/i],
+  ['response_format', /response_format|json_object/i],
+];
+
+/**
+ * Which request field a provider rejection is about, when it names one.
+ * @param detail - the provider's error message text.
+ * @returns the field to drop, or `undefined` when the detail is about
+ *   something else (auth, quota, a malformed schema, …).
+ */
+export function unsupportedFeature(detail: string): UnsupportedFeature | undefined {
+  for (const [feature, pattern] of UNSUPPORTED_PATTERNS) {
+    if (pattern.test(detail)) return feature;
+  }
+  return undefined;
 }

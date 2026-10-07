@@ -25,7 +25,6 @@ import type {
 } from '@deepseek-ai/dsh-llm';
 import type { CohereModelConfig } from '../config.js';
 import { failureFromProtocol } from '../failure.js';
-import { supportsStrictTools } from '../models.js';
 import { imageDataUrl, type ImageRefLike, type PreparedImages } from './images.js';
 
 /** A Cohere v2 text content block. */
@@ -181,9 +180,52 @@ function compactText(
   return projected;
 }
 
-/** Project one assistant message onto Cohere assistant content plus tool calls. */
-function projectAssistant(message: Message): CohereChatMessage | undefined {
-  const parts: CohereContentBlock[] = [];
+/**
+ * Coerce one harness tool-call `arguments` string into the shape Cohere replays.
+ *
+ * Cohere streams `"arguments": ""` for a tool that takes no parameters (verified
+ * live) and then rejects that same empty string on replay:
+ * "invalid tool call provided in messages[N].tool_calls[0]: tool arguments must
+ * be a stringified JSON object". `"null"` is accepted but `"[]"` is not, so the
+ * requirement is a JSON *object*. Anything else would 400 the whole request,
+ * which costs far more than losing a malformed argument payload.
+ * @param argumentsText - the arguments string carried by the harness block.
+ * @returns a stringified JSON object that is safe to send back to Cohere.
+ */
+function replayableArguments(argumentsText: string): string {
+  if (argumentsText.length === 0) return '{}';
+  try {
+    const parsed: unknown = JSON.parse(argumentsText);
+    if (typeof parsed === 'object' && parsed !== null && !Array.isArray(parsed)) {
+      return argumentsText;
+    }
+  } catch {
+    // Not JSON at all: fall through to the empty object.
+  }
+  return '{}';
+}
+
+/**
+ * Project one assistant message onto one or two Cohere assistant messages.
+ *
+ * Cohere v2 draws a hard line between the two assistant shapes: a message with
+ * `tool_calls` may not also carry text content
+ * (`messages with non-empty 'tool_calls' cannot contain content items of type
+ * 'text'`, verified live on every tool-capable route). The harness routinely
+ * produces exactly that shape — a model that narrates before calling a tool
+ * yields `[text, tool-call]` in one assistant message — so the prose is
+ * replayed as its own assistant turn immediately before the calls.
+ *
+ * Cohere's `tool_plan` field would be the natural home for that prose, but it is
+ * route-gated: `command-a-plus-05-2026` and `north-mini-code-1-0` both answer
+ * 400 "`tool plan` cannot be used with this model". Consecutive assistant turns
+ * are accepted everywhere tested, so they are the portable shape.
+ *
+ * @param message - one assistant message from the harness.
+ * @returns zero, one, or two Cohere assistant messages, in order.
+ */
+function projectAssistant(message: Message): readonly CohereChatMessage[] {
+  const parts: CohereTextBlock[] = [];
   const toolCalls: CohereToolCall[] = [];
   for (const block of message.content) {
     if (block.type === 'text') {
@@ -194,36 +236,39 @@ function projectAssistant(message: Message): CohereChatMessage | undefined {
       toolCalls.push({
         id: block.id,
         type: 'function',
-        function: { name: block.name, arguments: block.arguments },
+        function: { name: block.name, arguments: replayableArguments(block.arguments) },
       });
     }
     // Reasoning blocks are provider-internal and are deliberately not replayed:
     // Cohere v2 assistant content carries text, tool calls, and citations only.
   }
+  if (toolCalls.length > 0) {
+    const plan = parts.map((part) => part.text).join('');
+    return [
+      ...(plan.length === 0 ? [] : [{ role: 'assistant' as const, content: plan }]),
+      { role: 'assistant', tool_calls: toolCalls },
+    ];
+  }
   const content = compactText(parts);
-  if (content.length === 0 && toolCalls.length === 0) return undefined;
-  return {
-    role: 'assistant',
-    ...(content.length === 0 ? {} : { content }),
-    ...(toolCalls.length === 0 ? {} : { tool_calls: toolCalls }),
-  };
+  if (content.length === 0) return [];
+  return [{ role: 'assistant', content }];
 }
 
 /**
- * Project one harness message onto a Cohere message.
+ * Project one harness message onto zero or more Cohere messages.
  * @param message - one request message that carries a role and a source.
  * @param model - the route being called, for capability checks.
- * @returns the Cohere message, or `undefined` when the message has no wire form.
+ * @returns the Cohere messages, in order; empty when the message has no wire form.
  */
 function projectMessage(
   message: Message,
   model: CohereModelConfig,
   images: PreparedImages | undefined,
-): CohereChatMessage | undefined {
+): readonly CohereChatMessage[] {
   switch (message.role) {
     case 'system': {
       const text = joinText(message.content);
-      return text.length === 0 ? undefined : { role: 'system', content: text };
+      return text.length === 0 ? [] : [{ role: 'system', content: text }];
     }
     case 'developer': {
       // Developer messages publish incremental tool-set changes. Cohere v2 has
@@ -231,19 +276,19 @@ function projectMessage(
       // structured tool-addition/removal blocks are already reflected by the
       // `tools` array of the current request.
       const text = joinText(message.content);
-      return text.length === 0 ? undefined : { role: 'system', content: text };
+      return text.length === 0 ? [] : [{ role: 'system', content: text }];
     }
     case 'user':
-      return { role: 'user', content: projectUserContent(message.content, model, images) };
+      return [{ role: 'user', content: projectUserContent(message.content, model, images) }];
     case 'assistant':
       return projectAssistant(message);
     case 'tool': {
       const text = joinText(message.content);
       const body = text.length === 0 ? '{}' : text;
-      return { role: 'tool', content: body, tool_call_id: message.toolCallId };
+      return [{ role: 'tool', content: body, tool_call_id: message.toolCallId }];
     }
     default:
-      return undefined;
+      return [];
   }
 }
 
@@ -263,36 +308,90 @@ export function projectTools(
 }
 
 /**
+ * JSON-Schema keywords Cohere's `strict_tools` mode accepts.
+ *
+ * Cohere validates the entire tool catalog before it runs anything, and rejects
+ * the whole request with HTTP 400 ("invalid function at tools[N].function: extra
+ * restrictions to tool parameters apply when strict_tools=true") for any
+ * constraint outside this set. Verified live against `command-a-03-2025`:
+ *
+ * | accepted | rejected |
+ * | :--- | :--- |
+ * | `type` (incl. `['string','null']`), `enum`, `format`, `default` | `pattern`, `minLength`, `maxLength` |
+ * | `additionalProperties` (bool or schema), `uniqueItems` | `minimum`, `maximum`, `multipleOf` |
+ * | `anyOf`, `exclusiveMinimum`, nested objects with `required`, `items` | `minItems`, `minProperties` |
+ * | | `oneOf`, `allOf`, `not`, `const` |
+ *
+ * Because unknown keywords are refused as well, this is an allow-list: a schema
+ * outside it only costs the optimisation, never a failed request. Only keywords
+ * verified accepted live are listed, so `exclusiveMaximum` stays out even
+ * though its `exclusiveMinimum` sibling is in.
+ */
+const STRICT_SCHEMA_KEYWORDS: ReadonlySet<string> = new Set([
+  'type',
+  'title',
+  'description',
+  'default',
+  'example',
+  'examples',
+  'enum',
+  'format',
+  'properties',
+  'required',
+  'items',
+  'additionalProperties',
+  'anyOf',
+  'uniqueItems',
+  'exclusiveMinimum',
+]);
+
+/**
  * Whether one JSON Schema node keeps every object satisfiable under
  * `strict_tools`.
  *
- * Cohere rejects the whole request when any `object` node has no `required`
- * field ("extra restrictions to tool parameters apply when strict_tools=true"),
- * so the flag may only be sent for a fully compliant catalog.
+ * Two rules bite even inside the allowed keyword set, both verified live:
+ * every `object` node must declare at least one `required` field ("`object`
+ * type must have at least one required field"), and each `required` entry must
+ * name a property that the same node defines ("`required` contains an undefined
+ * field"). A structural keyword without a `type` is refused too ("missing
+ * required field 'type'").
  * @param node - any JSON Schema node.
- * @returns true when every reachable `object` node declares a `required` entry.
+ * @returns true when Cohere's strict mode accepts this node.
  */
 function strictCompatibleNode(node: unknown): boolean {
   if (typeof node !== 'object' || node === null) return true;
   const record = node as Record<string, unknown>;
+  for (const key of Object.keys(record)) {
+    if (!STRICT_SCHEMA_KEYWORDS.has(key)) return false;
+  }
+
   const type = record.type;
-  const objectLike =
-    type === 'object' || (type === undefined && record.properties !== undefined);
+  const declaresType = typeof type === 'string' || Array.isArray(type);
+  const properties = record.properties;
+  const objectLike = type === 'object' || (type === undefined && properties !== undefined);
   if (objectLike) {
     const required = record.required;
     if (!Array.isArray(required) || required.length === 0) return false;
+    const declared = new Set(
+      typeof properties === 'object' && properties !== null
+        ? Object.keys(properties as Record<string, unknown>)
+        : [],
+    );
+    for (const entry of required) {
+      if (typeof entry !== 'string' || !declared.has(entry)) return false;
+    }
   }
+  if (!declaresType && (properties !== undefined || record.items !== undefined)) return false;
+
   if (Array.isArray(record.items)) {
     for (const item of record.items) if (!strictCompatibleNode(item)) return false;
   } else if (record.items !== undefined && !strictCompatibleNode(record.items)) {
     return false;
   }
-  for (const key of ['properties', 'patternProperties', 'definitions', '$defs']) {
-    const map = record[key];
-    if (typeof map === 'object' && map !== null) {
-      for (const value of Object.values(map as Record<string, unknown>)) {
-        if (!strictCompatibleNode(value)) return false;
-      }
+  if (properties !== undefined) {
+    if (typeof properties !== 'object' || properties === null) return false;
+    for (const value of Object.values(properties as Record<string, unknown>)) {
+      if (!strictCompatibleNode(value)) return false;
     }
   }
   if (
@@ -302,11 +401,8 @@ function strictCompatibleNode(node: unknown): boolean {
   ) {
     return false;
   }
-  for (const key of ['anyOf', 'oneOf', 'allOf', 'prefixItems']) {
-    const list = record[key];
-    if (Array.isArray(list)) {
-      for (const entry of list) if (!strictCompatibleNode(entry)) return false;
-    }
+  if (Array.isArray(record.anyOf)) {
+    for (const entry of record.anyOf) if (!strictCompatibleNode(entry)) return false;
   }
   return true;
 }
@@ -354,10 +450,13 @@ export function buildChatRequest(
       continue;
     }
     const projected = projectMessage(message as Message, model, images);
-    if (projected !== undefined) messages.push(projected);
+    for (const entry of projected) messages.push(entry);
   }
 
-  const tools = projectTools(options.tools);
+  // A route without the live `tools` feature rejects the entire request with a
+  // 400 ("tool use is not supported by the provided model"), so an incapable
+  // catalog row degrades to a text-only call instead of a dead request.
+  const tools = model.tools === false ? undefined : projectTools(options.tools);
   const stop = options.stop?.slice(0, MAX_STOP_SEQUENCES);
   const maxTokens = Math.min(
     options.maxTokens !== undefined && Number.isFinite(options.maxTokens)
@@ -376,11 +475,16 @@ export function buildChatRequest(
     ...(tools === undefined ? {} : { tools }),
     ...(tools !== undefined &&
     policy.strictTools &&
-    supportsStrictTools(model.id) &&
+    model.strictTools !== false &&
     strictToolsCompatible(tools)
       ? { strict_tools: true }
       : {}),
-    ...(policy.includeCitations ? { citation_options: { mode: 'ENABLED' as const } } : {}),
+    // Citations are a per-route feature too: a model that rejects
+    // `citation_options` 400s the whole call, so the flag is honoured only
+    // where the route advertises the feature.
+    ...(policy.includeCitations && model.citations !== false
+      ? { citation_options: { mode: 'ENABLED' as const } }
+      : {}),
     ...(policy.jsonMode ? { response_format: { type: 'json_object' as const } } : {}),
     ...(thinking === undefined ? {} : { thinking }),
     max_tokens: maxTokens,
