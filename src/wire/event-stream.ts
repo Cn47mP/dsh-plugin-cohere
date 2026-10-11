@@ -135,8 +135,15 @@ async function* frames(source: AsyncIterable<string>): AsyncGenerator<SseFrame, 
   if (trailing !== undefined) yield trailing;
 }
 
-/** Map Cohere's `finish_reason` onto the harness taxonomy. */
-export function mapFinishReason(raw: string | undefined): FinishReason {
+/**
+ * Map Cohere's `finish_reason` onto the harness taxonomy.
+ * @param raw - the raw `finish_reason` string.
+ * @param errorDetail - the `error` object Cohere attaches to a `message-end`
+ *   frame when `finish_reason` is `"ERROR"` (its documented `message` and
+ *   `http_status` fields), when present.
+ * @returns the mapped finish reason.
+ */
+export function mapFinishReason(raw: string | undefined, errorDetail?: unknown): FinishReason {
   switch (raw) {
     case 'COMPLETE':
     case 'STOP_SEQUENCE':
@@ -148,7 +155,10 @@ export function mapFinishReason(raw: string | undefined): FinishReason {
     case 'ERROR':
       return {
         kind: 'error',
-        failure: makeFailure('cohere: provider reported an error finish reason', 'SERVER'),
+        failure: makeFailure(
+          `cohere: provider reported an error finish reason${formatErrorDetail(errorDetail)}`,
+          'SERVER',
+        ),
       };
     case 'TIMEOUT':
       return {
@@ -160,6 +170,21 @@ export function mapFinishReason(raw: string | undefined): FinishReason {
       // detects because no `message-end` arrived.
       return { kind: 'stop' };
   }
+}
+
+/**
+ * Render Cohere's `message-end` `error` object into a short, readable suffix.
+ * @param errorDetail - the `error` field of an `ERROR` `message-end` frame.
+ * @returns a `: message (http_status N)` suffix, or the empty string.
+ */
+function formatErrorDetail(errorDetail: unknown): string {
+  if (typeof errorDetail !== 'object' || errorDetail === null) return '';
+  const message = str(field(errorDetail, 'message'));
+  const status = num(field(errorDetail, 'http_status'));
+  const parts: string[] = [];
+  if (message !== undefined) parts.push(`: ${message}`);
+  if (status !== undefined) parts.push(` (http_status ${status})`);
+  return parts.join('');
 }
 
 /**
@@ -429,8 +454,10 @@ export async function* translateChatStream(
         }
         const usage = mapUsage(field(delta, 'usage') ?? field(payload, 'usage'));
         if (usage !== undefined) yield { type: 'usage', usage };
+        const finishReason = str(field(delta, 'finish_reason')) ?? str(field(payload, 'finish_reason'));
         pendingFinish = mapFinishReason(
-          str(field(delta, 'finish_reason')) ?? str(field(payload, 'finish_reason')),
+          finishReason,
+          finishReason === 'ERROR' ? field(delta, 'error') ?? field(payload, 'error') : undefined,
         );
         sawTerminal = true;
         break;

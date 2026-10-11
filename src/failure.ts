@@ -206,7 +206,24 @@ export function failureFromTransport(error: unknown, signal?: AbortSignal): Cohe
   }
   if (error instanceof CohereFailure) return error;
   const message = error instanceof Error ? error.message : String(error);
-  return new CohereFailure(`cohere: transport failure: ${message}`, 'TRANSPORT', { cause: error });
+  return new CohereFailure(
+    `cohere: transport failure: ${message}${transportCauseSuffix(error)}`,
+    'TRANSPORT',
+    { cause: error },
+  );
+}
+
+/**
+ * Extract undici's root socket error code (for example `ECONNRESET` or
+ * `ENOTFOUND`) from a `fetch failed` error, so the user sees *why* the
+ * transport died instead of only that it did.
+ * @param error - the caught value.
+ * @returns a ` (CODE)` suffix, or the empty string.
+ */
+function transportCauseSuffix(error: unknown): string {
+  const cause = typeof error === 'object' && error !== null ? (error as { cause?: unknown }).cause : undefined;
+  const code = typeof cause === 'object' && cause !== null ? (cause as { code?: unknown }).code : undefined;
+  return typeof code === 'string' && code.length > 0 ? ` (${code})` : '';
 }
 
 /**
