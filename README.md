@@ -59,6 +59,33 @@ npm run typecheck # 仅执行 TypeScript 类型检查
 npm test          # node --test
 ```
 
+> `test/`、`CHANGELOG.md`、`DESIGN.md`、`WORKLOG.md` 在 `.gitignore` 中，公开仓库不含它们，所以 CI 里的 `npm test` 是没有用例的空跑——测试只在本机有意义。
+
+## 发布
+
+发布走 [`Release`](.github/workflows/release.yml) 工作流，推 `v*` 标签即触发（也可手动 dispatch）。工作流会先跑 typecheck 与测试，再校验标签版本与 `package.json` 的 `version` 一致，并确认 `lib/index.js`、`lib/client.js`、`cordis.patch.yml` 都在包内，才允许发布：
+
+```bash
+# 改 package.json 的 version（或 npm version patch --no-git-tag-version）
+git commit -am "chore: release v0.1.11"
+git tag v0.1.11
+git push origin v0.1.11
+```
+
+发布凭据用 npm 的 **trusted publishing（OIDC）**：工作流持有 `id-token: write`，npm 用它换取一个短期发布 token，**不需要任何 npm 密钥**，provenance 也会自动签名并写入 sigstore 透明日志。仓库里无需配置 `NPM_TOKEN`；而且**不要**设置 `NODE_AUTH_TOKEN`——环境里的 token 会盖过 OIDC 交换。
+
+两条实测踩过的坑：
+
+- **npm 必须 ≥ 11.5.1**。Node 22 随附的仍是 npm 10.x，在 npm 10 上 registry 会回 404 而不是签发 token，所以工作流里显式升级 npm 并做版本断言。
+- **本机用 token 发布会被 2FA 拦下**：`403 ... Two-factor authentication or granular access token with bypass 2fa enabled is required to publish packages.`（0.1.10 那次 tag 发布就是这样失败的，尽管 provenance 已经签好）。要走本机兜底，得用带 2FA bypass 的 granular token，并且必须显式指定官方源（镜像只读）：
+
+```bash
+npm login --registry=https://registry.npmjs.org/
+npm publish --registry=https://registry.npmjs.org/
+```
+
+> `0.1.10` 是唯一的例外：可信发布只能配置在**已存在**的包上，所以首发由本机手动完成，也因此**没有 provenance**。从下一个版本起，CI 发布的每个版本都会自带 provenance。
+
 ## 配置项
 
 | 字段 | 默认值 | 说明 |

@@ -1,0 +1,85 @@
+name: Release
+
+# Publishes to npm through the package's trusted publisher (OIDC). The workflow
+# holds `id-token: write`, so npm exchanges the GitHub id-token for a
+# short-lived publish token — no npm secret required, and provenance is signed
+# and logged to the sigstore transparency log automatically.
+#
+# Why OIDC and not a token: this npm account requires 2FA for publishing. A
+# token-based publish therefore fails with
+#   "403 ... Two-factor authentication or granular access token with bypass 2fa
+#    enabled is required to publish packages."
+# unless the token is a granular access token with 2FA bypass enabled. Trusted
+# publishing sidesteps that: the token npm mints from the id-token is already
+# authorised for this repo + workflow.
+#
+# Two hard requirements for trusted publishing, both easy to get wrong:
+#   1. npm >= 11.5.1. Node 22 still ships npm 10.x, so npm is upgraded below.
+#      On npm 10 the registry answers 404 "not found" instead of minting a token.
+#   2. NODE_AUTH_TOKEN must NOT be set. A token in the environment wins over the
+#      OIDC exchange, so no token env is passed to the publish step on purpose.
+#
+# Runs on a v* tag, or manually against a ref.
+
+on:
+  push:
+    tags:
+      - 'v*'
+  workflow_dispatch:
+
+permissions:
+  contents: read
+  id-token: write # OIDC token exchange; provenance is signed from it
+
+jobs:
+  publish:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: '22'
+          registry-url: 'https://registry.npmjs.org'
+          package-manager-cache: false
+
+      - name: Upgrade npm for trusted publishing
+        run: |
+          npm install -g npm@latest
+          node -p "'npm ' + require('child_process').execSync('npm -v').toString().trim()"
+          # Fail loudly here rather than at the registry with an opaque 404.
+          node -e "const v=require('child_process').execSync('npm -v').toString().trim().split('.').map(Number); if (v[0]<11 || (v[0]===11 && v[1]<5)) { console.error('::error::npm '+v.join('.')+' is too old for trusted publishing (need >=11.5.1)'); process.exit(1); }"
+
+      - name: Install
+        run: npm ci --no-audit --no-fund
+
+      - name: Verify
+        run: |
+          npm run typecheck
+          npm test
+
+      - name: Build
+        run: npm run build
+
+      - name: Check the publish tag matches package.json
+        if: startsWith(github.ref, 'refs/tags/v')
+        run: |
+          tag="${GITHUB_REF_NAME#v}"
+          pkg="$(node -p "require('./package.json').version")"
+          if [ "$tag" != "$pkg" ]; then
+            echo "::error::tag v$tag does not match package.json version $pkg"
+            exit 1
+          fi
+
+      - name: Check the artifact DSH needs is present
+        run: |
+          # A published plugin is loaded from lib/; the browser half is copied
+          # there by scripts/copy-client.mjs. A missing entry point would install
+          # cleanly and then fail to activate, so refuse to publish one.
+          for f in lib/index.js lib/client.js cordis.patch.yml; do
+            test -f "$f" || { echo "::error::missing $f"; exit 1; }
+          done
+
+      - name: Publish
+        run: npm publish --provenance --access public
+        # No NODE_AUTH_TOKEN on purpose: it would shadow the OIDC exchange.
