@@ -74,6 +74,17 @@ git push origin v0.1.11
 
 发布凭据用 npm 的 **trusted publishing（OIDC）**：工作流持有 `id-token: write`，npm 用它换取一个短期发布 token，**不需要任何 npm 密钥**，provenance 也会自动签名并写入 sigstore 透明日志。仓库里无需配置 `NPM_TOKEN`；而且**不要**设置 `NODE_AUTH_TOKEN`——环境里的 token 会盖过 OIDC 交换。
 
+**前置条件（npm 侧，一次性）**：在 npmjs.com 该包的 **Settings → Trusted publishing** 添加 GitHub Actions 发布者，字段必须精确匹配 Organization/user = `Cn47mP`、Repository = `dsh-plugin-cohere`、Workflow filename = `release.yml`（Environment 留空）。
+
+没配好时症状很容易误判：`id-token` 仍然拿得到，provenance 照样签名成功并写入 sigstore 日志，前面 8 步全绿，**只有最后那次 registry PUT 回 404**：
+
+```
+npm error code E404
+npm error 404 Not Found - PUT https://registry.npmjs.org/dsh-plugin-cohere
+```
+
+npm 用 404 而不是 403 来避免泄露包是否存在，所以这个 404 基本等同于"可信发布没配好"，而不是"包不存在"或"版本冲突"。配好后重跑即可：`gh run rerun <run-id> --failed`。
+
 两条实测踩过的坑：
 
 - **npm 必须 ≥ 11.5.1**。Node 22 随附的仍是 npm 10.x，在 npm 10 上 registry 会回 404 而不是签发 token，所以工作流里显式升级 npm 并做版本断言。
