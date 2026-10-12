@@ -31,6 +31,9 @@ import {
 import { findCatalogEntry } from './models.js';
 import { buildChatRequest, type CohereChatRequest } from './wire/request.js';
 import { translateChatStream, type CohereStreamNotice } from './wire/event-stream.js';
+import { buildOpenAIChatRequest, type OpenAIChatRequest } from './wire/openai/request.js';
+import { translateOpenAIStream } from './wire/openai/event-stream.js';
+import { laneFor } from './wire/lane.js';
 import {
   messagesHaveImage,
   prepareImages,
@@ -173,7 +176,13 @@ async function* rearmOnItem<T>(
   }
 }
 
-/** The Cohere adapter: one provider route, streamed over Cohere v2 `/chat`. */
+/**
+ * The Cohere adapter: one provider route, two wire lanes.
+ *
+ * The lane is chosen per request by {@link module:dsh-plugin-cohere/wire/lane}:
+ * the OpenAI-compatible endpoint by default, Cohere's native v2 `/chat` whenever
+ * the request depends on a capability the compatibility layer cannot carry.
+ */
 export class CohereAdapter extends LlmAdapter {
   readonly #deps: CohereAdapterDeps;
 
@@ -272,6 +281,51 @@ export class CohereAdapter extends LlmAdapter {
     }
   }
 
+  /**
+   * POST one OpenAI-compatible chat request.
+   *
+   * Unlike {@link CohereAdapter.#sendChat} there is no degrade-and-retry step:
+   * the compatibility layer rejects *parameters and values* it will not serve
+   * (`citation_options`, `reasoning_effort: 'low'`, `top_logprobs`, …) rather
+   * than a model lacking a feature, and {@link module:dsh-plugin-cohere/wire/lane}
+   * keeps every request that needs such a field off this lane in the first place.
+   * A rejection here is therefore a real configuration or provider problem, and
+   * reporting it is more useful than silently dropping the field it names.
+   * @param request - the OpenAI-shaped request body to send.
+   * @param send - route, endpoint, key and the composed abort signals.
+   * @returns the first successful (2xx) response.
+   * @throws CohereFailure for transport errors and non-2xx responses.
+   */
+  async #sendCompatChat(
+    request: OpenAIChatRequest,
+    send: {
+      readonly baseURL: string;
+      readonly apiKey: string;
+      readonly signal: AbortSignal;
+      readonly callerSignal?: AbortSignal;
+    },
+  ): Promise<Response> {
+    let response: Response;
+    try {
+      response = await fetch(`${send.baseURL}/chat/completions`, {
+        method: 'POST',
+        headers: {
+          authorization: `Bearer ${send.apiKey}`,
+          'content-type': 'application/json',
+          accept: 'text/event-stream',
+          'x-client-name': 'dsh-plugin-cohere',
+          ...attributionHeaders(),
+        },
+        body: JSON.stringify(request),
+        signal: send.signal,
+      });
+    } catch (error) {
+      throw failureFromTransport(error, send.callerSignal);
+    }
+    if (response.ok) return response;
+    throw await failureFromResponse(response);
+  }
+
   /** @inheritdoc */
   override providerInfo(provider: string): LlmProviderInfo {
     return { id: provider, name: this.#deps.options().providerName };
@@ -351,7 +405,19 @@ export class CohereAdapter extends LlmAdapter {
       };
     }
 
-    const request = buildChatRequest(effective, model, config, images);
+    // Lane selection is per request: `auto` speaks the OpenAI-compatible
+    // endpoint unless this particular request needs a Cohere capability that
+    // endpoint provably cannot carry (see `wire/lane.ts`).
+    const decision = laneFor(config, {
+      model,
+      reasoningEffort:
+        typeof options.reasoningEffort === 'string' ? options.reasoningEffort : undefined,
+      hasImages: messagesHaveImage(options.messages),
+    });
+    this.#deps.onNotice?.({
+      kind: 'lane',
+      detail: { lane: decision.lane, reason: decision.reason, model: model.id },
+    });
 
     const headerAbort = new AbortController();
     const idleAbort = new AbortController();
@@ -384,14 +450,48 @@ export class CohereAdapter extends LlmAdapter {
     ]);
 
     let response: Response;
+    /** The translator for the lane that answered, bound once the lane is known. */
+    let translate: (
+      source: AsyncIterable<string>,
+    ) => AsyncGenerator<StreamChunk, void, undefined>;
     try {
-      response = await this.#sendChat(request, {
-        model,
-        baseURL: config.baseURL,
-        apiKey,
-        signal,
-        callerSignal: caller,
-      });
+      if (decision.lane === 'compat') {
+        translate = (source) =>
+          translateOpenAIStream(source, {
+            ...(this.#deps.onNotice === undefined ? {} : { onNotice: this.#deps.onNotice }),
+          });
+        response = await this.#sendCompatChat(
+          buildOpenAIChatRequest(
+            effective,
+            model,
+            { strictTools: config.strictTools, jsonMode: config.jsonMode },
+            images,
+          ),
+          {
+            baseURL: config.compatBaseURL,
+            apiKey,
+            signal,
+            callerSignal: caller,
+          },
+        );
+      } else {
+        translate = (source) =>
+          translateChatStream(source, {
+            ...(this.#deps.onNotice === undefined ? {} : { onNotice: this.#deps.onNotice }),
+            // Citations are requested only when the operator asked for them, and
+            // are surfaced as a trailing footnote block by the translator. This
+            // lane is the only one that can carry them at all, which is exactly
+            // why `auto` routes a citation request here.
+            ...(config.includeCitations ? { citations: true } : {}),
+          });
+        response = await this.#sendChat(buildChatRequest(effective, model, config, images), {
+          model,
+          baseURL: config.baseURL,
+          apiKey,
+          signal,
+          callerSignal: caller,
+        });
+      }
     } catch (error) {
       throw failureFromTransport(error, caller);
     } finally {
@@ -404,12 +504,7 @@ export class CohereAdapter extends LlmAdapter {
         throw failureFromProtocol('the response carried no body to stream');
       }
       armIdle();
-      yield* translateChatStream(rearmOnItem(decodeBody(response.body), armIdle), {
-        ...(this.#deps.onNotice === undefined ? {} : { onNotice: this.#deps.onNotice }),
-        // Citations are requested only when the operator asked for them, and are
-        // surfaced as a trailing footnote block by the translator.
-        ...(config.includeCitations ? { citations: true } : {}),
-      });
+      yield* translate(rearmOnItem(decodeBody(response.body), armIdle));
     } catch (error) {
       throw failureFromTransport(error, caller);
     } finally {

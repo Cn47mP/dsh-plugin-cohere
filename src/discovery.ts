@@ -11,6 +11,11 @@
  * Discovery only *adopts* metadata: the shipped catalog stays authoritative for
  * context windows, because the harness needs a window synchronously at dispatch.
  *
+ * Both lanes are read. A native node answers `{ models: [{ name, endpoints,
+ * context_length }] }`; Cohere's OpenAI-compatible node answers the OpenAI shape
+ * `{ data: [{ id, object, owned_by }] }` at `GET {compatBaseURL}/models`
+ * (verified live: 35 routes) and the same reader handles it.
+ *
  * Source: https://docs.cohere.com/reference/list-models
  *
  * @module dsh-plugin-cohere/discovery
@@ -53,10 +58,44 @@ export function discoveryCandidates(baseURL: string): string[] {
   return [...new Set(urls)];
 }
 
+/**
+ * Route-id prefixes the compatibility listing includes but this plugin cannot
+ * chat with.
+ *
+ * `GET {compatBaseURL}/models` answers in the OpenAI shape (`{ data: [{ id }] }`,
+ * verified live: 35 routes) and that listing is the whole endpoint surface —
+ * embeddings, reranking, parsing and transcription included. The OpenAI listing
+ * carries no capability field, so the only signal available is the id family.
+ * Filtering here is what keeps a reranking route out of the chat model picker;
+ * the native listing does the same job with its own `endpoints` field.
+ */
+const NON_CHAT_ID_PREFIXES: readonly string[] = ['embed-', 'rerank-', 'parse-', 'cohere-transcribe'];
+
+/** Whether a compatibility-listing id can serve `/chat/completions`. */
+function isChatCapableId(id: string): boolean {
+  return !NON_CHAT_ID_PREFIXES.some((prefix) => id.startsWith(prefix));
+}
+
+/** Project one OpenAI-shaped `{ data: [...] }` listing onto discovered routes. */
+function readOpenAIModels(body: unknown): readonly LlmDiscoveredModel[] {
+  const rows = field(body, 'data');
+  if (!Array.isArray(rows)) return [];
+  const discovered: LlmDiscoveredModel[] = [];
+  for (const row of rows) {
+    const id = field(row, 'id');
+    if (typeof id !== 'string' || id.length === 0 || !isChatCapableId(id)) continue;
+    discovered.push({ id, name: id, inputModalities: ['text'] });
+  }
+  return discovered;
+}
+
 /** Project one `{ models: [...] }` payload onto discovered chat routes. */
 function readModels(body: unknown): readonly LlmDiscoveredModel[] {
   const rows = field(body, 'models');
-  if (!Array.isArray(rows)) return [];
+  if (!Array.isArray(rows)) {
+    // The compatibility node answers in the OpenAI shape instead.
+    return readOpenAIModels(body);
+  }
   const discovered: LlmDiscoveredModel[] = [];
   for (const row of rows) {
     const id = field(row, 'name');

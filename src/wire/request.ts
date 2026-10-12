@@ -192,7 +192,7 @@ function compactText(
  * @param argumentsText - the arguments string carried by the harness block.
  * @returns a stringified JSON object that is safe to send back to Cohere.
  */
-function replayableArguments(argumentsText: string): string {
+export function replayableArguments(argumentsText: string): string {
   if (argumentsText.length === 0) return '{}';
   try {
     const parsed: unknown = JSON.parse(argumentsText);

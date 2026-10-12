@@ -97,17 +97,41 @@ npm publish --registry=https://registry.npmjs.org/
 
 > `0.1.10` 是唯一的例外：可信发布只能配置在**已存在**的包上，所以首发由本机手动完成，也因此**没有 provenance**。从下一个版本起，CI 发布的每个版本都会自带 provenance。
 
+## 协议车道（v0.2.0）
+
+插件同时接入 Cohere 的两个协议边界，并按请求自动选路：
+
+| 车道 | 端点 | 作用 |
+| :--- | :--- | :--- |
+| **compat**（默认） | `https://api.cohere.ai/compatibility/v1/chat/completions` | Cohere 维护的 OpenAI 兼容契约；文本、流式、工具调用、`reasoning_effort`、JSON 模式、精确 usage |
+| **native** | `https://api.cohere.com/v2/chat` | Cohere 原生 v2；承载兼容层**做不到**的能力 |
+
+选路规则（`wire: 'auto'`）：
+
+- 普通对话、工具调用、`off`/`high` 推理档 → **compat**；
+- `includeCitations`、`low` 推理档、请求带图片 → **native**（兼容层对 `citation_options` 直接 422，
+  对 `reasoning_effort: 'low'` 直接 422，对 `documents` 会静默丢弃）。
+
+之所以不是"全部走兼容层"，是因为实测发现兼容层对 Cohere 专有字段的处理是**静默丢弃**而非报错：
+开了引用却拿不到引用，且没有任何错误可循。这比直接失败更难排查，所以依赖这些能力的请求一律改走原生车道。
+
+`wire` 可设为 `compat` 或 `native` 强制固定车道。若你把 `baseURL` 指向了自己的网关却**没有**
+指定 `compatBaseURL`，`auto` 会留在原车道上，不会把请求发往 `api.cohere.ai`；要启用兼容车道，
+显式填写 `compatBaseURL` 即可。
+
 ## 配置项
 
 | 字段 | 默认值 | 说明 |
 | :--- | :--- | :--- |
-| `baseURL` | `https://api.cohere.com/v2` | 自定义网关 / 私有部署端点 |
+| `wire` | `auto` | 协议车道：`auto`（按请求自动）/ `compat` / `native` |
+| `baseURL` | `https://api.cohere.com/v2` | 原生车道节点（自定义网关 / 私有部署端点） |
+| `compatBaseURL` | `https://api.cohere.ai/compatibility/v1` | OpenAI 兼容车道节点；**清空即关闭该车道** |
 | `apiKeyEnv` | `COHERE_API_KEY` | 凭据引用名（通过 credentials 服务读取） |
 | `providerName` | `Cohere` | 显示名称 |
 | `models` | 内置目录 | 覆盖或增补模型配置；缺失时自动补充默认模型。每行可声明 `tools` / `citations` / `strictTools`（默认 `true`），对应 Cohere 该路由的线上 `features` |
 | `jsonMode` | `false` | 启用结构化输出（`response_format: { type: 'json_object' }`） |
-| `includeCitations` | `false` | 请求引用并在输出末尾生成「引用来源：」脚注块（仅对支持 `citations` 的路由生效） |
-| `strictTools` | `true` | 对支持该特性的路由且符合规范的工具发送 `strict_tools` |
+| `includeCitations` | `false` | 请求引用并在输出末尾生成「引用来源：」脚注块（仅对支持 `citations` 的路由生效；会自动改走原生车道） |
+| `strictTools` | `true` | 对支持该特性的路由且符合规范的工具发送 `strict_tools`（兼容车道为工具级 `strict: true`） |
 | `requestTimeoutMs` | `120000` | 初始响应头超时（毫秒） |
 | `streamIdleTimeoutMs` | `300000` | 流式数据空闲心跳超时（毫秒） |
 | `maxRequestImageBytes` | `20971520` (20MB) | 请求包含图片的总 Base64 大小上限 |

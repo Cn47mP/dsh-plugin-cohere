@@ -1,7 +1,7 @@
 {
   "name": "dsh-plugin-cohere",
-  "version": "0.1.13",
-  "description": "DSH native model provider for the Cohere v2 Chat API (https://api.cohere.com/v2/chat) — direct wire adapter, no proxy.",
+  "version": "0.2.0",
+  "description": "DSH model provider for Cohere — OpenAI-compatible wire by default, Cohere's native v2 lane for citations/RAG/thinking-budget. Direct wire adapter, no proxy.",
   "keywords": [
     "dsh",
     "dsh-plugin",

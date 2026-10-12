@@ -36,6 +36,8 @@ window.__ModuleLoader__.load({
     const DEFAULT_REF = 'COHERE_API_KEY';
     /** Shipped chat endpoint, shown as the node placeholder. */
     const DEFAULT_BASE_URL = 'https://api.cohere.com/v2';
+    /** Shipped OpenAI-compatible endpoint, shown as the second node placeholder. */
+    const DEFAULT_COMPAT_BASE_URL = 'https://api.cohere.ai/compatibility/v1';
 
     /** Reference the page derives for a route: `<ROUTE>_API_KEY`. */
     const deriveKeyRef = (provider) =>
@@ -219,6 +221,8 @@ window.__ModuleLoader__.load({
       const [models, setModels] = React.useState(undefined);
       const [rows, setRows] = React.useState(undefined);
       const [flags, setFlags] = React.useState({ jsonMode: false, includeCitations: false });
+      const [compatDraft, setCompatDraft] = React.useState('');
+      const [wire, setWire] = React.useState('auto');
       const [diag, setDiag] = React.useState([]);
 
       const pushDiag = (line) => setDiag((prev) => [...prev.slice(-8), line]);
@@ -271,6 +275,12 @@ window.__ModuleLoader__.load({
               });
               if (typeof value.baseURL === 'string' && value.baseURL.length > 0) {
                 setNodeDraft(value.baseURL);
+              }
+              if (typeof value.compatBaseURL === 'string' && value.compatBaseURL.length > 0) {
+                setCompatDraft(value.compatBaseURL);
+              }
+              if (value.wire === 'compat' || value.wire === 'native') {
+                setWire(value.wire);
               }
               if (Array.isArray(value.models)) {
                 setRows(value.models.map(fromSavedModel));
@@ -356,6 +366,45 @@ window.__ModuleLoader__.load({
             tone: 'ok',
             text: value.length === 0 ? 'API 节点已恢复默认' : `API 节点已保存：${value}`,
           });
+        });
+
+      /**
+       * Save the OpenAI-compatible node.
+       *
+       * Clearing it disables that lane entirely, which is how an operator who
+       * proxied the native node at their own gateway keeps every request on that
+       * gateway instead of letting `auto` reach Cohere's public endpoint.
+       */
+      const saveCompatNode = () =>
+        run(async () => {
+          const value = compatDraft.trim();
+          const failure =
+            value.length === 0
+              ? await writeSettings(ns, [{ op: 'unset', path: ['compatBaseURL'] }])
+              : await writeSettings(ns, [{ op: 'set', path: ['compatBaseURL'], value }]);
+          if (failure !== undefined) {
+            setNotice({ tone: 'error', text: failure });
+            return;
+          }
+          setNotice({
+            tone: 'ok',
+            text: value.length === 0 ? '兼容节点已清除（关闭兼容车道）' : `兼容节点已保存：${value}`,
+          });
+        });
+
+      /** Pin the wire lane, or hand the choice back to `auto`. */
+      const changeWire = (value) =>
+        run(async () => {
+          const failure =
+            value === 'auto'
+              ? await writeSettings(ns, [{ op: 'unset', path: ['wire'] }])
+              : await writeSettings(ns, [{ op: 'set', path: ['wire'], value }]);
+          if (failure !== undefined) {
+            setNotice({ tone: 'error', text: failure });
+            return;
+          }
+          setWire(value);
+          setNotice({ tone: 'ok', text: `wire = ${value}` });
         });
 
       const fetchModels = () =>
@@ -476,6 +525,45 @@ window.__ModuleLoader__.load({
             'button',
             { type: 'button', disabled: busy, onClick: saveNode, style: buttonStyle },
             '保存节点',
+          ),
+        ),
+        h(
+          'div',
+          { style: rowStyle },
+          h('input', {
+            type: 'text',
+            value: compatDraft,
+            disabled: busy,
+            placeholder: `兼容节点（留空=默认 ${DEFAULT_COMPAT_BASE_URL}；清除=关闭兼容车道）`,
+            'aria-label': 'Cohere 兼容节点',
+            onChange: (event) => setCompatDraft(event.target.value),
+            onKeyDown: (event) => {
+              if (event.key === 'Enter') saveCompatNode();
+            },
+            style: inputStyle,
+          }),
+          h(
+            'button',
+            { type: 'button', disabled: busy, onClick: saveCompatNode, style: buttonStyle },
+            '保存兼容节点',
+          ),
+        ),
+        h(
+          'div',
+          { style: rowStyle },
+          h('span', { style: mutedStyle }, '协议车道'),
+          h(
+            'select',
+            {
+              value: wire,
+              disabled: busy,
+              'aria-label': 'Cohere 协议车道',
+              onChange: (event) => changeWire(event.target.value),
+              style: inputStyle,
+            },
+            h('option', { value: 'auto' }, 'auto — 默认走 OpenAI 兼容，能力需要时自动走原生'),
+            h('option', { value: 'compat' }, 'compat — 全部走 OpenAI 兼容端点'),
+            h('option', { value: 'native' }, 'native — 全部走 Cohere v2 原生端点'),
           ),
         ),
         h(

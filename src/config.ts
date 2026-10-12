@@ -19,6 +19,21 @@ export const PROVIDER = 'cohere';
 /** Default Cohere v2 chat endpoint. */
 export const DEFAULT_BASE_URL = 'https://api.cohere.com/v2';
 
+/**
+ * Default Cohere OpenAI-compatible endpoint.
+ *
+ * Verified live: `GET {this}/models` answers with the same 35 routes as the
+ * native catalog listing, and `POST {this}/chat/completions` speaks the OpenAI
+ * chat-completions contract (see `wire/lane.ts` for what it cannot carry).
+ */
+export const DEFAULT_COMPAT_BASE_URL = 'https://api.cohere.ai/compatibility/v1';
+
+/** Lane selection modes accepted by the `wire` setting. */
+export const WIRE_MODES = ['auto', 'compat', 'native'] as const;
+
+/** One accepted lane selection mode. */
+export type WireModeSetting = (typeof WIRE_MODES)[number];
+
 /** Default credential reference read through the credentials service. */
 export const DEFAULT_API_KEY_ENV = 'COHERE_API_KEY';
 
@@ -70,6 +85,20 @@ const DEFAULT_MODELS = COHERE_MODELS.map((model) => ({
 export const Config = z.object({
   /** Cohere v2 base URL; `/chat` is appended. */
   baseURL: z.string().default(DEFAULT_BASE_URL).volatile(),
+  /** Cohere OpenAI-compatible base URL; `/chat/completions` is appended. */
+  compatBaseURL: z.string().default(DEFAULT_COMPAT_BASE_URL).volatile(),
+  /**
+   * Which wire lane to speak.
+   *
+   * `auto` (the default) uses the OpenAI-compatible endpoint and quietly moves a
+   * request to the native one when it needs a capability the compatibility layer
+   * provably cannot carry — see `wire/lane.ts`. `compat` and `native` pin every
+   * request to one lane regardless of its capabilities.
+   */
+  wire: z
+    .union([z.const('auto'), z.const('compat'), z.const('native')])
+    .default('auto')
+    .volatile(),
   /** Human-readable provider name shown in model selectors. */
   providerName: z.string().default('Cohere').volatile(),
   /** Advertised model catalog; replaces the shipped default when set. */
@@ -108,6 +137,18 @@ export type CohereModelConfig = CohereCatalogEntry;
 /** Detached, validated inputs the adapter runs on. */
 export interface CohereOptions {
   readonly baseURL: string;
+  /** Cohere's OpenAI-compatible node; `/chat/completions` is appended. */
+  readonly compatBaseURL: string;
+  /**
+   * Whether `auto` may use the compatibility lane at all.
+   *
+   * False when the node is cleared, and also when the operator redirected the
+   * native `baseURL` to their own gateway without naming a compatibility node —
+   * see `resolveOptions`.
+   */
+  readonly compatLaneEnabled: boolean;
+  /** Lane preference: `auto` decides per request, the others pin it. */
+  readonly wire: WireModeSetting;
   readonly providerName: string;
   readonly models: readonly CohereModelConfig[];
   readonly apiKeyEnv: string;
@@ -173,6 +214,31 @@ function nonEmptyString(value: unknown, fallback: string): string {
   return typeof value === 'string' && value.trim().length > 0 ? value.trim() : fallback;
 }
 
+/**
+ * Narrow the `wire` setting to an accepted lane mode.
+ * @param value - the resolved configuration field.
+ * @returns the mode, defaulting to `auto` for anything unrecognised.
+ */
+function wireMode(value: unknown): WireModeSetting {
+  return value === 'compat' || value === 'native' ? value : 'auto';
+}
+
+/**
+ * Read an endpoint field that may be switched off.
+ *
+ * Unlike {@link nonEmptyString} this preserves an explicitly empty string: an
+ * operator who clears the compatibility node means "do not use that lane", not
+ * "restore the default". Trailing slashes are stripped so path joining is a
+ * plain concatenation.
+ * @param value - the resolved configuration field.
+ * @param fallback - the endpoint to use when the field was never set.
+ * @returns the endpoint, or the empty string when explicitly cleared.
+ */
+function endpointOrDisabled(value: unknown, fallback: string): string {
+  if (typeof value !== 'string') return fallback;
+  return value.trim().replace(/\/+$/, '');
+}
+
 /** Coerce one configured model row into the adapter's catalog shape. */
 function normalizeModel(raw: unknown): CohereModelConfig | undefined {
   if (typeof raw !== 'object' || raw === null) return undefined;
@@ -220,8 +286,33 @@ export function resolveOptions(config: Record<string, unknown>): CohereOptions {
     // A configured catalog without the default model must still be routable.
     effective.push({ ...COHERE_MODELS[0]! });
   }
+
+  // The compatibility lane is enabled when it has an endpoint AND the operator
+  // either left the native node at Cohere's shipped default or pointed the
+  // compatibility node somewhere of their own. An operator who redirected
+  // `baseURL` at their own gateway and never named a compatibility node has not
+  // asked for traffic to reach Cohere's public endpoint, so `auto` stays on
+  // their node instead of silently sending requests to api.cohere.ai. That also
+  // keeps every pre-2.0 configuration behaving exactly as it did.
+  //
+  // "Pointed somewhere of their own" is judged against the shipped default
+  // rather than against presence: the configuration schema has already filled
+  // every unset field with its default by the time this runs, so an untouched
+  // `compatBaseURL` is indistinguishable from one the operator typed out in
+  // full. Only a *different* endpoint shows the operator meant it.
+  const rawBaseURL = read('baseURL');
+  const rawCompatBaseURL = read('compatBaseURL');
+  const baseURL = nonEmptyString(rawBaseURL, DEFAULT_BASE_URL).replace(/\/+$/, '');
+  const compatBaseURL = endpointOrDisabled(rawCompatBaseURL, DEFAULT_COMPAT_BASE_URL);
+  const compatLaneEnabled =
+    compatBaseURL.length > 0 &&
+    (baseURL === DEFAULT_BASE_URL || compatBaseURL !== DEFAULT_COMPAT_BASE_URL);
+
   return Object.freeze({
-    baseURL: nonEmptyString(read('baseURL'), DEFAULT_BASE_URL).replace(/\/+$/, ''),
+    baseURL,
+    compatBaseURL,
+    compatLaneEnabled,
+    wire: wireMode(read('wire')),
     providerName: nonEmptyString(read('providerName'), 'Cohere'),
     models: Object.freeze(effective),
     apiKeyEnv: credentialRefName(read('apiKeyEnv')),
