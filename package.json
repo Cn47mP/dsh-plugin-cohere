@@ -27,12 +27,12 @@
   "author": "cn47mp <233@cn47mp.moe>",
   "repository": {
     "type": "git",
-    "url": "git+ssh://git@github.com/cn47mp/dsh-plugin-cohere.git"
+    "url": "git+https://github.com/Cn47mP/dsh-plugin-cohere.git"
   },
   "bugs": {
-    "url": "https://github.com/cn47mp/dsh-plugin-cohere/issues"
+    "url": "https://github.com/Cn47mP/dsh-plugin-cohere/issues"
   },
-  "homepage": "https://github.com/cn47mp/dsh-plugin-cohere#readme",
+  "homepage": "https://github.com/Cn47mP/dsh-plugin-cohere#readme",
   "files": [
     "lib",
     "cordis.patch.yml",
