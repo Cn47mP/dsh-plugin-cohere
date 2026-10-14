@@ -395,6 +395,7 @@ export class CohereAdapter extends LlmAdapter {
           maxRequestImageBytes: config.maxRequestImageBytes,
           maxPixels: config.requestImagePixelBudget,
           maxImageBytes: config.requestImageMaxBytes,
+          detail: config.imageDetail,
         },
         access,
         options.signal,
@@ -407,12 +408,12 @@ export class CohereAdapter extends LlmAdapter {
 
     // Lane selection is per request: `auto` speaks the OpenAI-compatible
     // endpoint unless this particular request needs a Cohere capability that
-    // endpoint provably cannot carry (see `wire/lane.ts`).
+    // endpoint provably cannot carry (see `wire/lane.ts`). Images are no longer
+    // one of those: both lanes are verified for them.
     const decision = laneFor(config, {
       model,
       reasoningEffort:
         typeof options.reasoningEffort === 'string' ? options.reasoningEffort : undefined,
-      hasImages: messagesHaveImage(options.messages),
     });
     this.#deps.onNotice?.({
       kind: 'lane',
@@ -482,7 +483,16 @@ export class CohereAdapter extends LlmAdapter {
             // are surfaced as a trailing footnote block by the translator. This
             // lane is the only one that can carry them at all, which is exactly
             // why `auto` routes a citation request here.
-            ...(config.includeCitations ? { citations: true } : {}),
+            ...(config.includeCitations
+              ? {
+                  citations: true,
+                  // `footnote` (the default) keeps the 0.2.0 behaviour: one
+                  // trailing `引用来源：` text block, now gated on source
+                  // validity. `notice` instead routes citations through
+                  // `onNotice` and leaves the answer text untouched.
+                  citationDisplay: config.citationDisplay,
+                }
+              : {}),
           });
         response = await this.#sendChat(buildChatRequest(effective, model, config, images), {
           model,

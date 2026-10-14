@@ -34,6 +34,25 @@ export const WIRE_MODES = ['auto', 'compat', 'native'] as const;
 /** One accepted lane selection mode. */
 export type WireModeSetting = (typeof WIRE_MODES)[number];
 
+/**
+ * Where a reported citation reaches the user, accepted by `citationDisplay`.
+ *
+ * The harness has no citation content block, so `footnote` appends one trailing
+ * text block to the answer stream — the only on-screen path there is — while
+ * `notice` leaves the answer exactly as the model wrote it and hands the
+ * citations to the notice side channel, where they are logged.
+ */
+export const CITATION_DISPLAY_MODES = ['footnote', 'notice'] as const;
+
+/** One accepted citation display mode. */
+export type CitationDisplaySetting = (typeof CITATION_DISPLAY_MODES)[number];
+
+/** Image detail levels Cohere's Chat API accepts for one image block. */
+export const IMAGE_DETAIL_MODES = ['auto', 'low', 'high'] as const;
+
+/** One accepted image detail level. */
+export type ImageDetailSetting = (typeof IMAGE_DETAIL_MODES)[number];
+
 /** Default credential reference read through the credentials service. */
 export const DEFAULT_API_KEY_ENV = 'COHERE_API_KEY';
 
@@ -111,6 +130,19 @@ export const Config = z.object({
    * block listing the cited sources (see `wire/event-stream`).
    */
   includeCitations: z.boolean().default(false).volatile(),
+  /**
+   * Where the citations requested by `includeCitations` reach the user.
+   *
+   * `footnote` (the default, and the 0.2.0 behaviour) appends one trailing text
+   * block to the answer; `notice` keeps the model's own text as the whole
+   * answer and reports the citations through the notice side channel instead.
+   * Ignored while `includeCitations` is off, and it never changes what is
+   * requested from Cohere — only what the translator does with the reply.
+   */
+  citationDisplay: z
+    .union([z.const('footnote'), z.const('notice')])
+    .default('footnote')
+    .volatile(),
   /** Send `strict_tools`, letting Cohere constrain tool arguments by schema. */
   strictTools: z.boolean().default(true).volatile(),
   /**
@@ -119,6 +151,23 @@ export const Config = z.object({
    * request field, so this is a plugin/model-level switch.
    */
   jsonMode: z.boolean().default(false).volatile(),
+  /**
+   * Image `detail` sent with every image block (`low` | `high` | `auto`).
+   *
+   * Cohere's image guide defines the rule this switch controls: with `auto`
+   * (the provider default when the field is absent) an image is downscaled to
+   * 512×512 and billed 256 tokens unless one side exceeds 768px, at which point
+   * it is tiled at 1536×2048 with 256 tokens per 512×512 tile. The guide is
+   * explicit that small text needs `high` — "if you have trouble reading the
+   * text in an image, the model will too" — and a screenshot of a chat, a
+   * terminal, or an editor is exactly the case `auto` resolves to `low` and
+   * destroys. `high` is therefore the default here, at roughly two to three
+   * times the image token cost; set `auto` to keep the provider's own choice.
+   */
+  imageDetail: z
+    .union([z.const('auto'), z.const('low'), z.const('high')])
+    .default('high')
+    .volatile(),
   /** Abort a streaming call after this long with no SSE traffic. */
   streamIdleTimeoutMs: z.number().default(300_000).volatile(),
   /** Abort the initial request after this long awaiting response headers. */
@@ -153,8 +202,12 @@ export interface CohereOptions {
   readonly models: readonly CohereModelConfig[];
   readonly apiKeyEnv: string;
   readonly includeCitations: boolean;
+  /** How requested citations reach the user; only read when citations are on. */
+  readonly citationDisplay: CitationDisplaySetting;
   readonly strictTools: boolean;
   readonly jsonMode: boolean;
+  /** Image `detail` sent with every image block. */
+  readonly imageDetail: ImageDetailSetting;
   readonly streamIdleTimeoutMs: number;
   readonly requestTimeoutMs: number;
   readonly maxRequestImageBytes: number;
@@ -221,6 +274,32 @@ function nonEmptyString(value: unknown, fallback: string): string {
  */
 function wireMode(value: unknown): WireModeSetting {
   return value === 'compat' || value === 'native' ? value : 'auto';
+}
+
+/**
+ * Narrow the `citationDisplay` setting to an accepted display mode.
+ *
+ * Anything unrecognised — including a hand-edited settings file — falls back to
+ * `footnote`, the 0.2.0 behaviour, so a typo can never silently drop citations
+ * the operator asked for.
+ * @param value - the resolved configuration field.
+ * @returns the mode, defaulting to `footnote` for anything unrecognised.
+ */
+function citationDisplayMode(value: unknown): CitationDisplaySetting {
+  return value === 'notice' ? 'notice' : 'footnote';
+}
+
+/**
+ * Narrow the `imageDetail` setting to a level Cohere accepts.
+ *
+ * Anything unrecognised — including a hand-edited settings file — falls back to
+ * `high`, the level the image guide prescribes for small text, so a typo cannot
+ * silently downgrade every screenshot to a 512×512 thumbnail.
+ * @param value - the resolved configuration field.
+ * @returns the level, defaulting to `high` for anything unrecognised.
+ */
+function imageDetailMode(value: unknown): ImageDetailSetting {
+  return value === 'auto' || value === 'low' ? value : 'high';
 }
 
 /**
@@ -317,8 +396,10 @@ export function resolveOptions(config: Record<string, unknown>): CohereOptions {
     models: Object.freeze(effective),
     apiKeyEnv: credentialRefName(read('apiKeyEnv')),
     includeCitations: read('includeCitations') === true,
+    citationDisplay: citationDisplayMode(read('citationDisplay')),
     strictTools: read('strictTools') !== false,
     jsonMode: read('jsonMode') === true,
+    imageDetail: imageDetailMode(read('imageDetail')),
     streamIdleTimeoutMs: positiveInt(read('streamIdleTimeoutMs'), 300_000),
     requestTimeoutMs: positiveInt(read('requestTimeoutMs'), 120_000),
     maxRequestImageBytes: positiveInt(read('maxRequestImageBytes'), 20 * 1024 * 1024),

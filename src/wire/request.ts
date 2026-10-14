@@ -153,7 +153,17 @@ function projectUserContent(
         // guards a reference the store returned no bytes for.
         projected.push({ type: 'text', text: images.placeholder(ref) });
       } else {
-        projected.push({ type: 'image_url', image_url: { url: imageDataUrl(version) } });
+        // `detail` decides how much of the image survives: `auto`/`low` shrink it
+        // to 512×512 (256 tokens), which erases small text; `high` tiles it at
+        // 1536×2048. Cohere's image guide prescribes `high` for small text, and a
+        // screenshot is exactly that case.
+        projected.push({
+          type: 'image_url',
+          image_url: {
+            url: imageDataUrl(version),
+            ...(images.detail === undefined ? {} : { detail: images.detail }),
+          },
+        });
       }
       continue;
     }

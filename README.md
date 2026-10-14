@@ -108,9 +108,13 @@ npm publish --registry=https://registry.npmjs.org/
 
 选路规则（`wire: 'auto'`）：
 
-- 普通对话、工具调用、`off`/`high` 推理档 → **compat**；
-- `includeCitations`、`low` 推理档、请求带图片 → **native**（兼容层对 `citation_options` 直接 422，
+- 普通对话、工具调用、`off`/`high` 推理档、**带图片的请求** → **compat**；
+- `includeCitations`、`low` 推理档 → **native**（兼容层对 `citation_options` 直接 422，
   对 `reasoning_effort: 'low'` 直接 422，对 `documents` 会静默丢弃）。
+
+> 图片曾因 v0.2.0 探针在两条车道都超时而临时钉在 native 车道。2026-10-13 复测（1×1 至 20MB 单图、
+> 同消息双图、图片+工具、图片+工具结果历史，两条车道）**全部 200**，确认当年是代理瞬时故障，
+> 因此图片随默认 compat 车道走；仍可用 `wire: 'native'` 强制旧路径。
 
 之所以不是"全部走兼容层"，是因为实测发现兼容层对 Cohere 专有字段的处理是**静默丢弃**而非报错：
 开了引用却拿不到引用，且没有任何错误可循。这比直接失败更难排查，所以依赖这些能力的请求一律改走原生车道。
@@ -130,8 +134,10 @@ npm publish --registry=https://registry.npmjs.org/
 | `providerName` | `Cohere` | 显示名称 |
 | `models` | 内置目录 | 覆盖或增补模型配置；缺失时自动补充默认模型。每行可声明 `tools` / `citations` / `strictTools`（默认 `true`），对应 Cohere 该路由的线上 `features` |
 | `jsonMode` | `false` | 启用结构化输出（`response_format: { type: 'json_object' }`） |
-| `includeCitations` | `false` | 请求引用并在输出末尾生成「引用来源：」脚注块（仅对支持 `citations` 的路由生效；会自动改走原生车道） |
+| `includeCitations` | `false` | 请求引用（仅对支持 `citations` 的路由生效；会自动改走原生车道） |
+| `citationDisplay` | `footnote` | 引用如何上屏：`footnote` 在输出末尾生成「引用来源：」脚注块（只收录有可用标题或 URL 的来源，占位/裸 id 会被过滤；全被过滤时不发块）；`notice` 只写日志、**不改动正文** |
 | `strictTools` | `true` | 对支持该特性的路由且符合规范的工具发送 `strict_tools`（兼容车道为工具级 `strict: true`） |
+| `imageDetail` | `high` | 图片 `detail`（`low`/`high`/`auto`）。Cohere 的 `auto` 会把两边都 ≤768px 的图缩到 **512×512**（256 token），截图里的小字会被糊掉；官方文档要求小字用 `high`，故默认 `high`（图片 token 约为 low 的 2–3 倍）。设为 `auto` 交回服务端判断 |
 | `requestTimeoutMs` | `120000` | 初始响应头超时（毫秒） |
 | `streamIdleTimeoutMs` | `300000` | 流式数据空闲心跳超时（毫秒） |
 | `maxRequestImageBytes` | `20971520` (20MB) | 请求包含图片的总 Base64 大小上限 |

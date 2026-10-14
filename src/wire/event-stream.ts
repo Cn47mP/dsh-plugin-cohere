@@ -10,11 +10,12 @@
  *   neutralises any trailing junk a proxy might append;
  * - tool arguments stay the raw JSON string the provider streamed.
  *
- * Cohere v2 emits twelve event types. Two of them have no harness representation
- * and are surfaced as notices instead of content: `debug` (which carries the
- * full outgoing prompt, including tools and documents) and the citation family
- * (the harness has no citation content block, so injecting synthetic footnote
- * text would corrupt the durable assistant history).
+ * Cohere v2 emits twelve event types. Two of them have no harness
+ * representation: `debug` (which carries the full outgoing prompt, including
+ * tools and documents) is always surfaced as a notice, never as content; the
+ * citation family — the harness has no citation content block — either becomes
+ * one trailing footnote text block or stays a notice, as the `citationDisplay`
+ * hook decides.
  *
  * Source: https://docs.cohere.com/docs/streaming
  *
@@ -29,6 +30,7 @@ import type {
   ToolCallBlock,
   ToolCallId,
 } from '@deepseek-ai/dsh-llm';
+import type { CitationDisplaySetting } from '../config.js';
 import { failureFromProtocol, makeFailure } from '../failure.js';
 
 /** One event the harness cannot represent, surfaced for logging only. */
@@ -48,14 +50,33 @@ export interface CohereStreamHooks {
    * citation content block, so this is the only way a citation reaches the user.
    */
   readonly citations?: boolean;
+  /**
+   * Where surfaced citations go: one trailing footnote text block
+   * (`'footnote'`, the default) or the notice side channel (`'notice'`), which
+   * leaves the answer stream untouched. Only read when `citations` is true.
+   */
+  readonly citationDisplay?: CitationDisplaySetting;
 }
 
-/** One citation span Cohere reported for the answer text. */
+/**
+ * One citation span Cohere reported for the answer text.
+ *
+ * `sources` holds only the labels that survived {@link describeSource}'s
+ * validity gate, so a record with an empty list is never collected at all.
+ */
 interface CitationRecord {
   /** The cited answer text (may be empty when Cohere omits it). */
   readonly text: string;
   /** Human-facing descriptions of the cited sources. */
   readonly sources: readonly string[];
+}
+
+/** One citation source resolved into what can be said about it. */
+interface SourceDescription {
+  /** Best-effort label, used for the footnote when the source is valid. */
+  readonly label: string;
+  /** Whether the label identifies anything a reader could act on. */
+  readonly valid: boolean;
 }
 
 /** A block currently being assembled from deltas. */
@@ -229,34 +250,80 @@ export function mapUsage(usage: unknown): TokenUsage | undefined {
 }
 
 /**
- * Describe one citation source without asserting its full shape.
- * @param source - one entry of a citation's `sources` array.
- * @returns a short label, or `undefined` when nothing identifies it.
+ * Labels that identify nothing, and therefore mark a source invalid.
+ *
+ * These are the synthesised fallbacks a citation falls back to when the
+ * provider sent no usable title or URL: a document source with neither field
+ * (`document`), a tool source with no name (`tool:unknown`), and the
+ * citation-level fallback for a span with no sources at all (`未命名来源`).
+ * They are provenance noise, so a source that only yields one of them is
+ * rejected (WORKLOG §13.2).
  */
-function describeSource(source: unknown): string | undefined {
+const PLACEHOLDER_LABELS: ReadonlySet<string> = new Set([
+  'document',
+  'tool:unknown',
+  '未命名来源',
+]);
+
+/** A trimmed, non-empty string, or `undefined` when the value is not usable text. */
+function usableText(value: unknown): string | undefined {
+  const text = str(value)?.trim();
+  return text === undefined || text.length === 0 ? undefined : text;
+}
+
+/**
+ * Describe one citation source without asserting its full shape.
+ *
+ * Validity rule (WORKLOG §13.2): a source is valid only when it yields a usable
+ * **title** or a usable **URL** — a document's `title`, a URL attached to the
+ * document or to the source itself, or a tool output's `name` (the only title a
+ * tool result has). Everything else is a placeholder: the synthesised
+ * `document` / `tool:unknown` / `未命名来源` labels, the empty string, and a
+ * bare positional id such as Cohere's `doc:0`. A citation whose every source is
+ * invalid never enters the footnote, and a footnote left with nothing in it is
+ * not emitted at all — the answer stream stays exactly as the model wrote it.
+ * @param source - one entry of a citation's `sources` array.
+ * @returns the best-effort label, plus whether it is usable provenance.
+ */
+function describeSource(source: unknown): SourceDescription {
   const type = str(field(source, 'type'));
-  const id = str(field(source, 'id'));
+  const id = usableText(field(source, 'id'));
   const document = field(source, 'document');
   const toolOutput = field(source, 'tool_output') ?? field(source, 'toolOutput');
-  if (document !== undefined || type === 'document') {
-    return str(field(document, 'title')) ?? str(field(document, 'id')) ?? id ?? 'document';
-  }
-  if (toolOutput !== undefined || type === 'tool') {
-    return `tool:${str(field(toolOutput, 'name')) ?? id ?? 'unknown'}`;
-  }
-  return id ?? type ?? undefined;
+  const isTool = toolOutput !== undefined || type === 'tool';
+  const title =
+    usableText(field(document, 'title')) ??
+    usableText(field(source, 'title')) ??
+    usableText(field(toolOutput, 'name'));
+  const url = usableText(field(document, 'url')) ?? usableText(field(source, 'url'));
+  // A tool output is titled by its tool's name; the `tool:` prefix keeps the
+  // footnote reading as provenance rather than prose (the 0.2.0 label format).
+  const label = title === undefined ? url : isTool ? `tool:${title}` : title;
+  // Validity follows the title/URL alone, so a bare id never passes the gate.
+  const valid = label !== undefined && !PLACEHOLDER_LABELS.has(label);
+  if (label !== undefined) return { label, valid };
+  // Nothing usable: report the placeholder this source would have fallen back
+  // to, so a rejected citation still carries a readable reason.
+  const placeholder = isTool
+    ? `tool:${id ?? 'unknown'}`
+    : document !== undefined || type === 'document'
+      ? 'document'
+      : (id ?? type ?? '');
+  return { label: placeholder, valid: false };
 }
 
 /**
  * Render collected citations as one compact footnote block.
- * @param citations - the spans the provider reported, in arrival order.
+ * @param citations - the spans the provider reported, in arrival order. Every
+ *   span carries at least one source that passed {@link describeSource}'s
+ *   validity gate, so no placeholder label can reach the rendered text.
  * @returns the block text, or an empty string when there is nothing to show.
  */
 function renderCitations(citations: readonly CitationRecord[]): string {
   const lines: string[] = [];
   const seen = new Set<string>();
   for (const citation of citations) {
-    const label = citation.sources.length > 0 ? citation.sources.join('、') : '未命名来源';
+    const label = citation.sources.join('、');
     if (seen.has(label)) continue;
     seen.add(label);
     const raw = citation.text.trim().replace(/\s+/g, ' ');
@@ -282,6 +349,11 @@ export async function* translateChatStream(
     hooks.onNotice?.({ kind, detail });
   };
 
+  // `citationDisplay: 'notice'` keeps the model-generated text pristine:
+  // citations are reported through the side channel instead of a trailing
+  // footnote block. Surfacing stays off entirely when it was not requested.
+  const surfaceCitations = hooks.citations === true && hooks.citationDisplay !== 'notice';
+
   let open: OpenBlock | undefined;
   let nextIndex = 0;
   let producedContent = 0;
@@ -292,9 +364,15 @@ export async function* translateChatStream(
 
   const close = (): StreamChunk | undefined => {
     if (open === undefined) return undefined;
-    // Only a block that actually carries something counts as produced content:
-    // a bare content-start/content-end pair is not a usable answer.
-    const meaningful = open.kind === 'tool-call' || open.text.length > 0;
+    // Only a block the user can actually read counts as produced content: a bare
+    // content-start/content-end pair is not a usable answer, and neither is a
+    // reasoning block. A turn that only thought and then stopped leaves an empty
+    // assistant message on screen, so it must fall through to the
+    // `EMPTY_RESPONSE` guard below — which the harness retries
+    // (`policyKey` lists `EMPTY_RESPONSE` among its retryable codes). Verified
+    // live: `command-a-plus-05-2026` can answer with thinking alone and
+    // `finish_reason: COMPLETE` (session-1e322330, turn 6).
+    const meaningful = open.kind === 'tool-call' || (open.kind === 'text' && open.text.length > 0);
     const block: ContentBlock =
       open.kind === 'tool-call'
         ? ({
@@ -418,31 +496,38 @@ export async function* translateChatStream(
         const raw =
           field(messageDelta, 'citations') ?? field(delta, 'citations') ?? field(payload, 'citations');
         const node = Array.isArray(raw) ? raw[0] : raw;
+        if (!surfaceCitations) {
+          notice('citation-start', node);
+          break;
+        }
         const sources: string[] = [];
         const list = field(node, 'sources');
         if (Array.isArray(list)) {
           for (const source of list) {
-            const label = describeSource(source);
-            if (label !== undefined) sources.push(label);
+            const described = describeSource(source);
+            if (described.valid) sources.push(described.label);
           }
         }
-        if (hooks.citations === true) {
+        // A span whose every source is a placeholder (or that has none) carries
+        // no provenance, so it never enters the footnote. If that leaves the
+        // footnote empty, the terminal handler emits no block at all.
+        if (sources.length > 0) {
           citations.push({ text: str(field(node, 'text')) ?? '', sources });
-        } else {
-          notice('citation-start', node);
         }
         break;
       }
       case 'citation-end': {
-        if (hooks.citations !== true) notice('citation-end', field(delta, 'message') ?? delta);
+        if (!surfaceCitations) notice('citation-end', field(delta, 'message') ?? delta);
         break;
       }
       case 'message-end': {
         const closed = close();
         if (closed !== undefined) yield closed;
         // Citations surface as one trailing text block, before the terminal
-        // usage/finish pair the harness contract requires to stay last.
-        if (hooks.citations === true && citations.length > 0) {
+        // usage/finish pair the harness contract requires to stay last. Spans
+        // whose sources were all placeholders were never collected, so an empty
+        // list means "nothing worth showing" and yields no extra block.
+        if (surfaceCitations && citations.length > 0) {
           const text = renderCitations(citations);
           if (text.length > 0) {
             const index = nextIndex++;

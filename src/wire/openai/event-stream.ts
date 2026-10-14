@@ -256,7 +256,13 @@ export async function* translateOpenAIStream(
     const block = openText;
     if (block === undefined) return undefined;
     openText = undefined;
-    if (block.text.length > 0) producedContent += 1;
+    // Only the answer counts, never the thinking: a reasoning-only turn leaves an
+    // empty assistant message, so it must reach the `EMPTY_RESPONSE` guard below
+    // and let the harness retry it (its retry policy lists `EMPTY_RESPONSE`).
+    // Verified live on this lane: `command-a-plus-05-2026` can emit
+    // `reasoning_content` and then `finish_reason: stop` with no `content` at all
+    // (session-1e322330, turn 6).
+    if (block.kind === 'text' && block.text.length > 0) producedContent += 1;
     return {
       type: 'block-end',
       index: block.index,

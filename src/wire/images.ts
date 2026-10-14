@@ -70,6 +70,12 @@ export interface ImagePolicy {
   readonly maxPixels: number;
   /** Per-image encoded byte cap used to pick the re-encode target. */
   readonly maxImageBytes: number;
+  /**
+   * `detail` sent with every image block. Cohere downscales an image to 512×512
+   * (256 tokens) under `auto`/`low` unless a side exceeds 768px, which destroys
+   * the small text in a screenshot; `high` tiles it at 1536×2048 instead.
+   */
+  readonly detail?: 'auto' | 'low' | 'high' | undefined;
 }
 
 /** Everything the request builder needs to project images. */
@@ -78,6 +84,8 @@ export interface PreparedImages {
   readonly versions: ReadonlyMap<string, RequestImageLike>;
   /** Placeholder text for one offloaded image. */
   readonly placeholder: (ref: ImageRefLike) => string;
+  /** `detail` to attach to every projected image block, when configured. */
+  readonly detail?: 'auto' | 'low' | 'high' | undefined;
 }
 
 /** Compute aspect-preserving integer dimensions within a total-pixel cap. */
@@ -191,7 +199,7 @@ export async function prepareImages(
   const placeholder = (ref: ImageRefLike): string =>
     offloadedImageText(ref as never, access(store, ref) as never);
 
-  return { versions, placeholder };
+  return { versions, placeholder, detail: policy.detail };
 }
 
 /** Apply the offloaded-image placeholders across one message list. */

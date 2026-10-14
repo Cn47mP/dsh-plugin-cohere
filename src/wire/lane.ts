@@ -25,6 +25,17 @@
  * So every request that depends on such a field is routed to the native lane
  * rather than sent to the compatibility layer.
  *
+ * **Images are not such a field.** A v0.2.0 probe saw `UND_ERR_HEADERS_TIMEOUT`
+ * on both lanes and left the compatibility lane unverified, so images were kept
+ * on the native lane as a precaution. The 2026-10-13 probe round could not
+ * reproduce that timeout anywhere — 1×1 through 20MB images, one or two images
+ * per message, image+tools, image+tool-result history, streaming and
+ * non-streaming, `fetch` and `node:https` — and every case answered HTTP 200 on
+ * **both** lanes (`test/probe-vision.mjs`, `test/probe-vision-combos.mjs`). The
+ * timeout was a transient proxy condition, not a lane capability, so image
+ * requests now ride the compatibility lane like everything else. An operator who
+ * wants the old path can still pin `wire: 'native'`.
+ *
  * @module dsh-plugin-cohere/wire/lane
  */
 
@@ -49,7 +60,6 @@ export type LaneReason =
   | 'unsupported-mode'
   | 'citations'
   | 'thinking-budget'
-  | 'image'
   | 'compat-lane-disabled';
 
 /** One lane decision plus the evidence for it. */
@@ -87,8 +97,6 @@ export interface LaneInputs {
   readonly model: CohereModelConfig;
   /** The harness reasoning effort, when the caller set one. */
   readonly reasoningEffort?: string | undefined;
-  /** Whether the request carries image blocks. */
-  readonly hasImages: boolean;
   /**
    * Whether the compatibility lane may be used at all, as resolved by
    * configuration (a cleared node, or a `baseURL` redirected to a custom gateway
@@ -143,12 +151,8 @@ export function decideLane(inputs: LaneInputs): LaneDecision {
     return { lane: 'native', reason: 'thinking-budget' };
   }
 
-  // Image input is served by the native lane, whose encoder this plugin owns end
-  // to end. The compatibility layer could not be verified for images at all: the
-  // probe request never returned headers (UND_ERR_HEADERS_TIMEOUT) on either
-  // lane, so there is no evidence that image blocks survive it.
-  if (inputs.hasImages) return { lane: 'native', reason: 'image' };
-
+  // No image rule here: images are verified on both lanes (see the module note),
+  // so an image request takes the default path like any other.
   return { lane: 'compat', reason: 'default' };
 }
 
@@ -163,7 +167,6 @@ export function laneFor(
   ids: {
     readonly model: CohereModelConfig;
     readonly reasoningEffort?: string | undefined;
-    readonly hasImages: boolean;
   },
 ): LaneDecision {
   return decideLane({
@@ -171,7 +174,6 @@ export function laneFor(
     includeCitations: options.includeCitations,
     model: ids.model,
     reasoningEffort: ids.reasoningEffort,
-    hasImages: ids.hasImages,
     compatLaneEnabled: options.compatLaneEnabled,
   });
 }

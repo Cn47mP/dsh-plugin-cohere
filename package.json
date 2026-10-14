@@ -1,6 +1,6 @@
 {
   "name": "dsh-plugin-cohere",
-  "version": "0.2.0",
+  "version": "0.3.0",
   "description": "DSH model provider for Cohere — OpenAI-compatible wire by default, Cohere's native v2 lane for citations/RAG/thinking-budget. Direct wire adapter, no proxy.",
   "keywords": [
     "dsh",
